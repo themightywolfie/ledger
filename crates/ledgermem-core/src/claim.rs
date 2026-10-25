@@ -139,6 +139,14 @@ impl Scope {
 }
 
 impl ScopeLevel {
+    const ALL: [ScopeLevel; 5] = [
+        ScopeLevel::Org,
+        ScopeLevel::User,
+        ScopeLevel::Project,
+        ScopeLevel::Agent,
+        ScopeLevel::Session,
+    ];
+
     fn as_str(self) -> &'static str {
         match self {
             ScopeLevel::Org => "org",
@@ -168,13 +176,10 @@ impl FromStr for Scope {
             return Ok(Scope::org());
         }
         let (level, id) = text.split_once(':').ok_or_else(invalid)?;
-        let level = match level {
-            "user" => ScopeLevel::User,
-            "project" => ScopeLevel::Project,
-            "agent" => ScopeLevel::Agent,
-            "session" => ScopeLevel::Session,
-            _ => return Err(invalid()),
-        };
+        let level = ScopeLevel::ALL
+            .into_iter()
+            .find(|candidate| *candidate != ScopeLevel::Org && candidate.as_str() == level)
+            .ok_or_else(invalid)?;
         if id.is_empty() {
             return Err(invalid());
         }

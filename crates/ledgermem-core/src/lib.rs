@@ -19,7 +19,7 @@ pub use error::{Error, Result};
 pub use journal::{EntryKind, JournalEntry, NewEntry};
 pub use ledger::{LOCAL_TENANT, Ledger};
 pub use ops::{
-    Answer, ClaimInput, ClaimResult, JournalQuery, ReadIntent, ReadPack, Recall, Remember,
+    ClaimInput, ClaimResult, JournalQuery, ReadIntent, ReadPack, Recall, RecalledClaim, Remember,
     RememberOutcome,
 };
 pub use store::{Commit, Projection, Store, StoreError};

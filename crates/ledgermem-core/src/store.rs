@@ -13,7 +13,7 @@ pub trait Store: Send + Sync {
 
     /// Appends the entries to their scopes' journals, numbering each from the scope's last
     /// sequence, then applies the projection updates. Everything commits together or not at all.
-    fn commit(&self, tenant: &str, commit: Commit) -> Result<Vec<JournalEntry>, StoreError>;
+    fn commit(&self, tenant: &str, commit: Commit) -> Result<(), StoreError>;
 
     /// Full-text search over claim text and subject within the given scopes, best match first.
     fn search(

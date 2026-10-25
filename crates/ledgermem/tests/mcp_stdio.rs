@@ -108,6 +108,33 @@ async fn claims_outlive_the_server_in_the_database_named_by_db() {
     second.cancel().await.expect("close second client");
 }
 
+#[tokio::test]
+async fn an_argument_the_server_does_not_support_is_refused_not_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = connect(
+        &dir.path().join("ledgermem.db"),
+        &["--project", "billing-api"],
+    )
+    .await;
+
+    let mut arguments = deployed_version_claim();
+    arguments["claims"][0]["scope"] = json!("org");
+    let Value::Object(arguments) = arguments else {
+        unreachable!()
+    };
+    let refused = client
+        .call_tool(CallToolRequestParams::new("memory_remember").with_arguments(arguments))
+        .await
+        .expect("tool call");
+    assert_eq!(refused.is_error, Some(true), "{refused:?}");
+    assert!(
+        format!("{refused:?}").contains("unknown field `scope`"),
+        "{refused:?}"
+    );
+
+    client.cancel().await.expect("close client");
+}
+
 #[test]
 fn a_tenant_other_than_local_must_already_exist() {
     let dir = tempfile::tempdir().unwrap();

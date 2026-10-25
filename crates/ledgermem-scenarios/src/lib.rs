@@ -30,7 +30,7 @@ use ledgermem_core::{
 };
 use ledgermem_sqlite::SqliteStore;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use time::OffsetDateTime;
 
 #[derive(Debug, Deserialize)]
@@ -141,27 +141,29 @@ async fn run_step(
 
     let outcome = match (step.remember, step.recall, step.journal) {
         (Some(claim), None, None) => {
-            let outcome = ledger
-                .remember(
-                    caller,
-                    Remember {
-                        claims: vec![claim],
-                    },
-                )
-                .await;
-            to_json(outcome)?
-                .pointer("/results/0")
-                .cloned()
-                .unwrap_or(Value::Null)
+            let remember = Remember {
+                claims: vec![claim],
+            };
+            to_json(ledger.remember(caller, remember).await).map(|outcome| {
+                outcome
+                    .pointer("/results/0")
+                    .cloned()
+                    .unwrap_or(Value::Null)
+            })
         }
-        (None, Some(recall), None) => to_json(ledger.recall(caller, recall).await)?,
-        (None, None, Some(query)) => to_json(ledger.journal(caller, query).await)?,
+        (None, Some(recall), None) => to_json(ledger.recall(caller, recall).await),
+        (None, None, Some(query)) => to_json(ledger.journal(caller, query).await),
         _ => return Err("a step needs exactly one of remember, recall or journal".into()),
     };
 
-    match step.expect {
-        Some(expected) => matches(&expected, &outcome, "outcome"),
-        None => Ok(()),
+    let expected = step.expect.unwrap_or(Value::Null);
+    let expects_error = expected.get("error").is_some();
+    match outcome {
+        Ok(outcome) if expects_error => Err(format!("expected an error, got {outcome}")),
+        Ok(_) if expected.is_null() => Ok(()),
+        Ok(outcome) => matches(&expected, &outcome, "outcome"),
+        Err(error) if expects_error => matches(&expected, &error, "outcome"),
+        Err(error) => Err(format!("engine error: {error}")),
     }
 }
 
@@ -180,9 +182,15 @@ fn parse_duration(text: &str) -> Result<time::Duration, String> {
     }
 }
 
-fn to_json<T: serde::Serialize>(outcome: ledgermem_core::Result<T>) -> Result<Value, String> {
-    let outcome = outcome.map_err(|e| format!("engine error: {e}"))?;
-    serde_json::to_value(outcome).map_err(|e| e.to_string())
+/// The step's outcome as JSON, or its error as `{ "error": { "code", "message" } }`, the body
+/// every surface returns.
+fn to_json<T: serde::Serialize>(outcome: ledgermem_core::Result<T>) -> Result<Value, Value> {
+    let error =
+        |code: &str, message: String| json!({ "error": { "code": code, "message": message } });
+    match outcome {
+        Ok(outcome) => serde_json::to_value(outcome).map_err(|e| error("internal", e.to_string())),
+        Err(e) => Err(error(e.code(), e.to_string())),
+    }
 }
 
 fn matches(expected: &Value, actual: &Value, path: &str) -> Result<(), String> {

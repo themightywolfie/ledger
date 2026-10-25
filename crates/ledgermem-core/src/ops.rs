@@ -1,4 +1,7 @@
 //! Requests the engine accepts and the outcomes it returns. Surfaces serialize these as they are.
+//!
+//! Requests refuse fields they don't know, so an argument this version doesn't support is an
+//! error rather than silently ignored.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -8,6 +11,7 @@ use crate::claim::{ClaimId, Scope, Status};
 
 /// Propose claims for memory.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct Remember {
     /// The claims to propose: one subject, one predicate and one value each.
@@ -16,6 +20,7 @@ pub struct Remember {
 
 /// One claim as a caller writes it.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct ClaimInput {
     /// The thing the claim is about, as `kind:name`, such as `service:billing-api`.
@@ -43,6 +48,7 @@ pub struct ClaimResult {
 
 /// Recall what is known about a subject or question.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct Recall {
     /// The question or keywords to recall by.
@@ -62,12 +68,12 @@ pub enum ReadIntent {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ReadPack {
     pub intent: ReadIntent,
-    pub answer_set: Vec<Answer>,
+    pub answer_set: Vec<RecalledClaim>,
 }
 
 /// One claim in an answer set.
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct Answer {
+pub struct RecalledClaim {
     pub claim_id: ClaimId,
     pub scope: Scope,
     pub subject: String,
@@ -84,6 +90,7 @@ pub struct Answer {
 
 /// Read one scope's journal.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct JournalQuery {
     pub scope: Scope,
 }

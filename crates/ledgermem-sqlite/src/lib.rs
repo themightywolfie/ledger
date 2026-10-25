@@ -5,9 +5,10 @@
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 use ledgermem_core::{Claim, Commit, JournalEntry, Projection, Scope, Store, StoreError};
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -48,6 +49,8 @@ const SCHEMA: &str = "
     CREATE VIRTUAL TABLE IF NOT EXISTS claims_fts USING fts5 (text, subject);
 ";
 
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub struct SqliteStore {
     conn: Mutex<Connection>,
 }
@@ -58,6 +61,8 @@ impl SqliteStore {
         let conn = Connection::open(path).map_err(StoreError::new)?;
         conn.pragma_update(None, "journal_mode", "wal")
             .map_err(StoreError::new)?;
+        // Other processes may hold the write lock: several agents can share one database.
+        conn.busy_timeout(BUSY_TIMEOUT).map_err(StoreError::new)?;
         Self::init(conn)
     }
 
@@ -100,10 +105,13 @@ impl Store for SqliteStore {
             .map_err(StoreError::new)
     }
 
-    fn commit(&self, tenant: &str, commit: Commit) -> Result<Vec<JournalEntry>, StoreError> {
+    fn commit(&self, tenant: &str, commit: Commit) -> Result<(), StoreError> {
         let mut conn = self.conn()?;
-        let tx = conn.transaction().map_err(StoreError::new)?;
-        let mut appended = Vec::with_capacity(commit.entries.len());
+        // Take the write lock before reading the last sequence number, so a writer in another
+        // process can't number the same entry.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StoreError::new)?;
         for entry in commit.entries {
             let scope = entry.scope.to_string();
             let seq: i64 = tx
@@ -114,7 +122,7 @@ impl Store for SqliteStore {
                 )
                 .map_err(StoreError::new)?;
             let entry = entry.numbered(u64::try_from(seq).map_err(StoreError::new)?);
-            let row = to_json(&entry)?;
+            let serialized = to_json(&entry)?;
             tx.execute(
                 "INSERT INTO entries (tenant, scope, seq, id, kind, actor, channel, recorded_at, content)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -123,23 +131,21 @@ impl Store for SqliteStore {
                     scope,
                     seq,
                     entry.id,
-                    row["kind"].as_str(),
+                    serialized["kind"].as_str(),
                     entry.actor,
-                    row["channel"].as_str(),
-                    row["recorded_at"].as_str(),
+                    serialized["channel"].as_str(),
+                    serialized["recorded_at"].as_str(),
                     entry.content.to_string(),
                 ],
             )
             .map_err(StoreError::new)?;
-            appended.push(entry);
         }
         for projection in commit.projections {
             match projection {
                 Projection::PutClaim(claim) => put_claim(&tx, tenant, &claim)?,
             }
         }
-        tx.commit().map_err(StoreError::new)?;
-        Ok(appended)
+        tx.commit().map_err(StoreError::new)
     }
 
     fn search(

@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::claim::{Scope, ScopeLevel};
+use crate::error::{Error, Result};
 
 /// Everything the engine needs to know about who is asking. Surfaces build it from an API key or
 /// from launch arguments. The model never supplies it.
@@ -46,6 +47,22 @@ pub enum Permission {
     Admin,
 }
 
+impl Permission {
+    fn as_str(self) -> &'static str {
+        match self {
+            Permission::Read => "read",
+            Permission::Propose => "propose",
+            Permission::Attest => "attest",
+            Permission::Resolve => "resolve",
+            Permission::Forget => "forget",
+            Permission::RelayUser => "relay_user",
+            Permission::DeclareSource => "declare_source",
+            Permission::Operator => "operator",
+            Permission::Admin => "admin",
+        }
+    }
+}
+
 /// The user, project and agent scopes a caller is bound to. Org scope is always within bounds.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScopeBounds {
@@ -82,6 +99,29 @@ impl Caller {
     pub fn with_permissions(mut self, permissions: impl IntoIterator<Item = Permission>) -> Self {
         self.permissions = permissions.into_iter().collect();
         self
+    }
+
+    /// Fails unless the caller holds `permission`.
+    pub(crate) fn require(&self, permission: Permission) -> Result<()> {
+        if self.permissions.contains(&permission) {
+            return Ok(());
+        }
+        Err(Error::PermissionDenied(format!(
+            "{} lacks the {} permission",
+            self.actor,
+            permission.as_str()
+        )))
+    }
+
+    /// Fails unless `scope` is one the caller may read.
+    pub(crate) fn require_visible(&self, scope: &Scope) -> Result<()> {
+        if self.visible_scopes().contains(scope) {
+            return Ok(());
+        }
+        Err(Error::ScopeDenied(format!(
+            "{scope} is outside the scope bounds of {}",
+            self.actor
+        )))
     }
 
     /// Where a write lands when the caller names no scope: the project if bound, else the user.

@@ -1,4 +1,7 @@
-//! Journal entries: the append-only record every change to memory is written to first.
+//! Journal entries: every change to memory is appended to its scope's journal first.
+//!
+//! Entries are not hash-chained yet. Content hashes and chain hashes (ADR-0003) arrive with
+//! ticket #02, before anything is released.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

@@ -4,13 +4,14 @@ use std::sync::Arc;
 
 use time::Duration;
 
-use crate::caller::Caller;
+use crate::caller::{Caller, Permission};
 use crate::claim::{Claim, ClaimId, Source, SourceKind, Status};
 use crate::clock::Clock;
 use crate::error::{Error, Result};
 use crate::journal::{EntryKind, JournalEntry, NewEntry};
 use crate::ops::{
-    Answer, ClaimResult, JournalQuery, ReadIntent, ReadPack, Recall, Remember, RememberOutcome,
+    ClaimResult, JournalQuery, ReadIntent, ReadPack, Recall, RecalledClaim, Remember,
+    RememberOutcome,
 };
 use crate::store::{Commit, Projection, Store};
 
@@ -46,6 +47,7 @@ impl Ledger {
 
     /// Proposes claims. Each one is appended to its scope's journal before any read can see it.
     pub async fn remember(&self, caller: &Caller, req: Remember) -> Result<RememberOutcome> {
+        caller.require(Permission::Propose)?;
         let now = self.clock.now();
         let scope = caller.default_write_scope();
         let source = Source {
@@ -84,7 +86,7 @@ impl Ledger {
                 recorded_at: now,
                 content: serde_json::to_value(&claim).map_err(internal)?,
             };
-            commit.projections.extend(project(&entry)?);
+            commit.projections.extend(projections_for(&entry)?);
             commit.entries.push(entry);
         }
 
@@ -94,6 +96,7 @@ impl Ledger {
 
     /// Recalls the claims that hold now and match the query, best match first.
     pub async fn recall(&self, caller: &Caller, req: Recall) -> Result<ReadPack> {
+        caller.require(Permission::Read)?;
         let now = self.clock.now();
         let limit = req.limit.unwrap_or(DEFAULT_RECALL_LIMIT);
         let claims =
@@ -102,7 +105,7 @@ impl Ledger {
 
         let answer_set = claims
             .into_iter()
-            .map(|claim| Answer {
+            .map(|claim| RecalledClaim {
                 trust: claim.source.kind.prior(),
                 age: format_age(now - claim.recorded_at),
                 claim_id: claim.id,
@@ -121,14 +124,17 @@ impl Ledger {
         })
     }
 
-    /// Every entry in one scope's journal, in sequence order.
+    /// Every entry in one scope's journal, in sequence order. The scope must be within the
+    /// caller's bounds. This is the journal view of the review operations' browse.
     pub async fn journal(&self, caller: &Caller, query: JournalQuery) -> Result<Vec<JournalEntry>> {
+        caller.require(Permission::Read)?;
+        caller.require_visible(&query.scope)?;
         Ok(self.store.journal(&caller.tenant, &query.scope)?)
     }
 }
 
 /// The projector: the projection updates a journal entry implies (ADR-0010).
-fn project(entry: &NewEntry) -> Result<Vec<Projection>> {
+fn projections_for(entry: &NewEntry) -> Result<Vec<Projection>> {
     match entry.kind {
         EntryKind::ClaimWritten => {
             let claim = serde_json::from_value(entry.content.clone()).map_err(internal)?;
