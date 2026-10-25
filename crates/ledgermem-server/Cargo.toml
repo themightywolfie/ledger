@@ -1,0 +1,15 @@
+[package]
+name = "ledgermem-server"
+description = "MCP and REST surfaces for the Ledger engine."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ledgermem-core = { workspace = true, features = ["schemars"] }
+rmcp = { workspace = true, features = ["server", "macros", "transport-io"] }
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true

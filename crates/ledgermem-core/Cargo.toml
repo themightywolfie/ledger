@@ -1,0 +1,20 @@
+[package]
+name = "ledgermem-core"
+description = "The Ledger engine: domain types, integrity rules and ports. No database, HTTP or model dependencies."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+# Derives JSON Schemas for the request and response types, for surfaces that publish them.
+schemars = ["dep:schemars"]
+
+[dependencies]
+schemars = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time.workspace = true
+ulid.workspace = true

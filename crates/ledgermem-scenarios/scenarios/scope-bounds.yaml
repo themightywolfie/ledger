@@ -1,0 +1,35 @@
+name: a claim lands in the caller's project, or its user scope without one, and is recalled only within bounds
+clock: 2026-10-25T09:00:00Z
+callers:
+  billing: { kind: agent, project: billing-api }
+  payments: { kind: agent, project: payments }
+  unbound: { kind: agent }
+steps:
+  - as: billing
+    remember:
+      subject: "service:billing-api"
+      predicate: deployed_version
+      value: "2.14.0"
+      text: "billing-api is running 2.14.0 in production"
+    expect: { status: proposed }
+
+  - as: payments
+    recall: { query: "billing-api deployed version" }
+    expect: { answer_set: [] }
+
+  - as: unbound
+    remember:
+      subject: "user:local"
+      predicate: timezone
+      value: "Asia/Kolkata"
+      text: "the user's timezone is Asia/Kolkata"
+
+  - as: unbound
+    journal: { scope: "user:local" }
+    expect: [ { seq: 1, kind: claim_written, actor: "agent:unbound" } ]
+
+  - as: billing
+    recall: { query: "timezone" }
+    expect:
+      answer_set:
+        - { subject: "user:local", scope: "user:local", status: proposed, trust: 0.30 }

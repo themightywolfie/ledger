@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - name: ledgermem-core has no database, HTTP or model dependencies
+        shell: bash
+        run: |
+          if cargo tree -p ledgermem-core -e normal --prefix none \
+              | grep -E '^(rusqlite|libsqlite3-sys|sqlx|tokio-postgres|postgres|reqwest|hyper|axum|rmcp|fastembed|ort) '; then
+            echo "ledgermem-core must not depend on the crates above" >&2
+            exit 1
+          fi

@@ -1,0 +1,33 @@
+name: an agent's claim is journaled, then recalled as proposed with its trust and age
+clock: 2026-10-25T09:00:00Z
+callers:
+  coder: { kind: agent, project: billing-api, agent: claude-code }
+steps:
+  - as: coder
+    remember:
+      subject: "service:billing-api"
+      predicate: deployed_version
+      value: "2.14.0"
+      text: "billing-api is running 2.14.0 in production"
+    expect: { status: proposed, trust: 0.30 }
+
+  - as: coder
+    journal: { scope: "project:billing-api" }
+    expect:
+      - { seq: 1, kind: claim_written, actor: "agent:claude-code", channel: agent }
+
+  - advance: 38m
+
+  - as: coder
+    recall: { query: "what version of billing-api is deployed?" }
+    expect:
+      intent: current
+      answer_set:
+        - subject: "service:billing-api"
+          predicate: deployed_version
+          value: "2.14.0"
+          text: "billing-api is running 2.14.0 in production"
+          scope: "project:billing-api"
+          status: proposed
+          trust: 0.30
+          age: 38m

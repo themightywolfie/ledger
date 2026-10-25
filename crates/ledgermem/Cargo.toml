@@ -1,0 +1,22 @@
+[package]
+name = "ledgermem"
+description = "Ledger: the memory layer for agents that checks before it believes."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+clap.workspace = true
+dirs.workspace = true
+ledgermem-core.workspace = true
+ledgermem-server.workspace = true
+ledgermem-sqlite.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+rmcp = { workspace = true, features = ["client", "transport-child-process"] }
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["process"] }
