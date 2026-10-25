@@ -1,0 +1,26 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Visualizer
+/web/node_modules/
+/web/dist/
+/web/test-results/
+/web/playwright-report/
+/.playwright-mcp/
+
+# Local Ledger data and backups
+*.db
+*.db-wal
+*.db-shm
+*.lmbk
+/ledgermem.toml
+
+# Environment and editors
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
