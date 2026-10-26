@@ -7,15 +7,18 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
-use ledgermem_core::{Claim, Commit, JournalEntry, Projection, Scope, Store, StoreError};
+use ledgermem_core::{
+    Claim, Commit, JournalEntry, Projection, Scope, Store, StoreError, genesis_hash,
+};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-const SCHEMA: &str = "
-    PRAGMA foreign_keys = ON;
+/// The schema version this build creates and opens, kept in SQLite's `user_version`.
+const SCHEMA_VERSION: i64 = 1;
 
+const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS tenants (
         id          TEXT PRIMARY KEY,
         created_at  TEXT NOT NULL
@@ -31,6 +34,9 @@ const SCHEMA: &str = "
         channel      TEXT NOT NULL,
         recorded_at  TEXT NOT NULL,
         content      TEXT,
+        content_hash TEXT NOT NULL,
+        prev_hash    TEXT NOT NULL,
+        entry_hash   TEXT NOT NULL,
         PRIMARY KEY (tenant, scope, seq)
     ) STRICT;
 
@@ -72,7 +78,31 @@ impl SqliteStore {
     }
 
     fn init(conn: Connection) -> Result<Self, StoreError> {
-        conn.execute_batch(SCHEMA).map_err(StoreError::new)?;
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .map_err(StoreError::new)?;
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(StoreError::new)?;
+        match version {
+            SCHEMA_VERSION => {}
+            0 if has_journal(&conn)? => {
+                return Err(StoreError::new(
+                    "this database was made by a pre-release build of ledgermem whose journals \
+                     have no hash chains; move it aside, and ledgermem will create a new one",
+                ));
+            }
+            0 => {
+                conn.execute_batch(SCHEMA).map_err(StoreError::new)?;
+                conn.pragma_update(None, "user_version", SCHEMA_VERSION)
+                    .map_err(StoreError::new)?;
+            }
+            newer => {
+                return Err(StoreError::new(format!(
+                    "this database uses schema version {newer}, newer than this ledgermem \
+                     understands ({SCHEMA_VERSION}); upgrade ledgermem to open it"
+                )));
+            }
+        }
         Ok(SqliteStore {
             conn: Mutex::new(conn),
         })
@@ -107,25 +137,32 @@ impl Store for SqliteStore {
 
     fn commit(&self, tenant: &str, commit: Commit) -> Result<(), StoreError> {
         let mut conn = self.conn()?;
-        // Take the write lock before reading the last sequence number, so a writer in another
-        // process can't number the same entry.
+        // Take the write lock before reading the scope's last entry, so a writer in another
+        // process can't number or chain the same entry.
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StoreError::new)?;
         for entry in commit.entries {
             let scope = entry.scope.to_string();
-            let seq: i64 = tx
+            let last: Option<(i64, String)> = tx
                 .query_row(
-                    "SELECT COALESCE(MAX(seq), 0) + 1 FROM entries WHERE tenant = ?1 AND scope = ?2",
+                    "SELECT seq, entry_hash FROM entries WHERE tenant = ?1 AND scope = ?2
+                     ORDER BY seq DESC LIMIT 1",
                     params![tenant, scope],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
+                .optional()
                 .map_err(StoreError::new)?;
-            let entry = entry.numbered(u64::try_from(seq).map_err(StoreError::new)?);
+            let (seq, prev_hash) = match last {
+                Some((seq, entry_hash)) => (seq + 1, entry_hash),
+                None => (1, genesis_hash(&entry.scope)),
+            };
+            let entry = entry.seal(u64::try_from(seq).map_err(StoreError::new)?, prev_hash);
             let serialized = to_json(&entry)?;
             tx.execute(
-                "INSERT INTO entries (tenant, scope, seq, id, kind, actor, channel, recorded_at, content)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT INTO entries (tenant, scope, seq, id, kind, actor, channel, recorded_at,
+                                      content, content_hash, prev_hash, entry_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     tenant,
                     scope,
@@ -136,14 +173,15 @@ impl Store for SqliteStore {
                     serialized["channel"].as_str(),
                     serialized["recorded_at"].as_str(),
                     entry.content.to_string(),
+                    entry.content_hash,
+                    entry.prev_hash,
+                    entry.entry_hash,
                 ],
             )
             .map_err(StoreError::new)?;
         }
         for projection in commit.projections {
-            match projection {
-                Projection::PutClaim(claim) => put_claim(&tx, tenant, &claim)?,
-            }
+            apply(&tx, tenant, projection)?;
         }
         tx.commit().map_err(StoreError::new)
     }
@@ -166,7 +204,7 @@ impl Store for SqliteStore {
                  WHERE claims_fts MATCH ?1
                    AND c.tenant = ?2
                    AND c.scope IN (SELECT value FROM json_each(?3))
-                 ORDER BY bm25(claims_fts)
+                 ORDER BY bm25(claims_fts), c.id
                  LIMIT ?4",
             )
             .map_err(StoreError::new)?;
@@ -184,8 +222,9 @@ impl Store for SqliteStore {
         let conn = self.conn()?;
         let mut statement = conn
             .prepare(
-                "SELECT id, seq, kind, actor, channel, recorded_at, content FROM entries
-                 WHERE tenant = ?1 AND scope = ?2 ORDER BY seq",
+                "SELECT id, seq, kind, actor, channel, recorded_at, content,
+                        content_hash, prev_hash, entry_hash
+                 FROM entries WHERE tenant = ?1 AND scope = ?2 ORDER BY seq",
             )
             .map_err(StoreError::new)?;
         let rows = statement
@@ -199,6 +238,9 @@ impl Store for SqliteStore {
                     "channel": row.get::<_, String>(4)?,
                     "recorded_at": row.get::<_, String>(5)?,
                     "content": row.get::<_, Option<String>>(6)?,
+                    "content_hash": row.get::<_, String>(7)?,
+                    "prev_hash": row.get::<_, String>(8)?,
+                    "entry_hash": row.get::<_, String>(9)?,
                 }))
             })
             .map_err(StoreError::new)?;
@@ -211,6 +253,61 @@ impl Store for SqliteStore {
             serde_json::from_value(row).map_err(StoreError::new)
         })
         .collect()
+    }
+
+    fn scopes(&self, tenant: &str) -> Result<Vec<Scope>, StoreError> {
+        let conn = self.conn()?;
+        let mut statement = conn
+            .prepare("SELECT DISTINCT scope FROM entries WHERE tenant = ?1 ORDER BY scope")
+            .map_err(StoreError::new)?;
+        let rows = statement
+            .query_map([tenant], |row| row.get::<_, String>(0))
+            .map_err(StoreError::new)?;
+        rows.map(|scope| {
+            scope
+                .map_err(StoreError::new)?
+                .parse()
+                .map_err(StoreError::new)
+        })
+        .collect()
+    }
+
+    fn replace_projections(
+        &self,
+        tenant: &str,
+        projections: Vec<Projection>,
+    ) -> Result<(), StoreError> {
+        let mut conn = self.conn()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StoreError::new)?;
+        tx.execute(
+            "DELETE FROM claims_fts WHERE rowid IN (SELECT rowid FROM claims WHERE tenant = ?1)",
+            [tenant],
+        )
+        .map_err(StoreError::new)?;
+        tx.execute("DELETE FROM claims WHERE tenant = ?1", [tenant])
+            .map_err(StoreError::new)?;
+        for projection in projections {
+            apply(&tx, tenant, projection)?;
+        }
+        tx.commit().map_err(StoreError::new)
+    }
+}
+
+/// Whether the database already has a journal table, however old.
+fn has_journal(conn: &Connection) -> Result<bool, StoreError> {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'entries')",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(StoreError::new)
+}
+
+fn apply(tx: &Transaction<'_>, tenant: &str, projection: Projection) -> Result<(), StoreError> {
+    match projection {
+        Projection::PutClaim(claim) => put_claim(tx, tenant, &claim),
     }
 }
 

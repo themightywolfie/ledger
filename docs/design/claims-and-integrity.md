@@ -264,17 +264,31 @@ Each **scope** (tenant + level + id) has one journal, a sequence of entries numb
 
 **Entry kinds:** `claim_written`, `evidence_attached`, `status_changed`, `claim_superseded`, `conflict_opened`, `conflict_resolved`, `claim_retracted`, `question_opened`, `question_answered`, `claim_forgotten`, `policy_applied`, `quarantine_released`.
 
-**Hashing** uses SHA-256 over RFC 8785 canonical JSON:
+**Hashing** uses SHA-256 over RFC 8785 canonical JSON, written as `sha256:` followed by 64 lowercase hex digits:
 
 ```
 content_hash = sha256(jcs(entry.content))
-entry_hash   = sha256(jcs({ scope, seq, kind, content_hash, prev_hash,
+entry_hash   = sha256(jcs({ id, scope, seq, kind, content_hash, prev_hash,
                             recorded_at, actor, channel, policy_version, refs }))
 prev_hash    = previous entry's entry_hash, or sha256("ledgermem:genesis:" + scope) for seq 1
 ```
 
+- `scope` is written `level:id`, such as `project:billing-api`, or `org`.
+- `recorded_at` is RFC 3339 in UTC.
+- `policy_version` is `null` and `refs` is `[]` until entries carry them, so entries sealed before then keep verifying afterwards.
+- The genesis hash names the scope but not the tenant, so a journal still verifies after it is restored into a tenant with a different name.
+
 Because the chain commits to `content_hash` rather than the content, **forget** can null an entry's content (and any evidence payload referenced only by forgotten claims) while every chain still verifies (ADR-0003). A `claim_forgotten` entry records the claim id, the content hashes removed, the actor and the reason.
 
-**Verification** (`ledgermem verify`, the visualizer badge, and every restore) recomputes each entry hash in order and checks sequence continuity. It reports the first broken link per scope.
+**Verification** (`ledgermem verify`, the visualizer badge, every restore and every reindex) walks each journal in order and reports its first broken link: the entry's `seq` and the first of these checks that fails.
+
+| Problem | Meaning |
+| --- | --- |
+| `missing_entry` | The journal skips this sequence number, so the entry was deleted. |
+| `content_hash_mismatch` | The entry's content no longer matches its `content_hash`. |
+| `prev_hash_mismatch` | The entry doesn't link to the entry before it, so an earlier entry was replaced, even by a forgery with recomputed hashes. |
+| `entry_hash_mismatch` | A header field (actor, channel, time, kind, id) no longer matches `entry_hash`. |
+
+Reindex and restore refuse a journal that doesn't verify, and change nothing.
 
 **Forget register.** Each instance keeps the ids and content hashes of everything ever forgotten, outside any tenant's data, so it survives a tenant being emptied. Restore re-applies matching forgets after replay and reports how many were re-applied. A backup restored onto a different machine cannot know about forgets made after the backup was taken. The CLI warns about this, and the documentation states it.

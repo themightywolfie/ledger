@@ -1,6 +1,11 @@
 //! Two stores on one database file, as two `ledgermem mcp` processes on one machine would be.
 
-use ledgermem_core::{Channel, Commit, EntryKind, NewEntry, Scope, ScopeLevel, Store};
+use std::sync::Arc;
+
+use ledgermem_core::{
+    Caller, Channel, Commit, EntryKind, Ledger, NewEntry, Permission, Scope, ScopeLevel, Store,
+    SystemClock,
+};
 use ledgermem_sqlite::SqliteStore;
 use serde_json::json;
 use time::macros::datetime;
@@ -55,4 +60,18 @@ fn concurrent_writers_number_a_scopes_entries_without_gaps_or_failures() {
         .map(|entry| entry.seq)
         .collect();
     assert_eq!(seqs, (1..=2 * COMMITS_PER_STORE).collect::<Vec<_>>());
+
+    // Every entry also links to the one before it, whichever writer sealed it.
+    let ledger = Ledger::new(
+        Arc::new(SqliteStore::open(&path).unwrap()),
+        Arc::new(SystemClock),
+    );
+    let operator =
+        Caller::operator("local", "test", Channel::Cli).with_permissions([Permission::Operator]);
+    let report = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(ledger.verify_journals(&operator))
+        .unwrap();
+    assert!(report.ok, "{report:?}");
 }

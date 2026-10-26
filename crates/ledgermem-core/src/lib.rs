@@ -16,10 +16,10 @@ pub use caller::{Caller, Channel, Permission, ScopeBounds};
 pub use claim::{Claim, ClaimId, Scope, ScopeLevel, Source, SourceKind, Status};
 pub use clock::{Clock, SystemClock, TestClock};
 pub use error::{Error, Result};
-pub use journal::{EntryKind, JournalEntry, NewEntry};
+pub use journal::{EntryKind, JournalEntry, NewEntry, genesis_hash};
 pub use ledger::{LOCAL_TENANT, Ledger};
 pub use ops::{
-    ClaimInput, ClaimResult, JournalQuery, ReadIntent, ReadPack, Recall, RecalledClaim, Remember,
-    RememberOutcome,
+    BrokenLink, ChainProblem, ChainReport, ClaimInput, ClaimResult, JournalQuery, ReadIntent,
+    ReadPack, Recall, RecalledClaim, ReindexReport, Remember, RememberOutcome, ScopeChain,
 };
 pub use store::{Commit, Projection, Store, StoreError};

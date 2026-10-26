@@ -86,6 +86,18 @@ impl Caller {
         }
     }
 
+    /// A person looking after the tenant's memory, acting through `channel`, with no permissions
+    /// yet. Operator operations such as verifying journals span every scope in the tenant.
+    pub fn operator(tenant: &str, operator: &str, channel: Channel) -> Self {
+        Caller {
+            tenant: tenant.to_owned(),
+            actor: format!("operator:{operator}"),
+            channel,
+            permissions: BTreeSet::new(),
+            bounds: ScopeBounds::default(),
+        }
+    }
+
     pub fn with_user(mut self, user: &str) -> Self {
         self.bounds.user = Some(user.to_owned());
         self

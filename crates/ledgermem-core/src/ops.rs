@@ -3,6 +3,8 @@
 //! Requests refuse fields they don't know, so an argument this version doesn't support is an
 //! error rather than silently ignored.
 
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::OffsetDateTime;
@@ -93,4 +95,74 @@ pub struct RecalledClaim {
 #[serde(deny_unknown_fields)]
 pub struct JournalQuery {
     pub scope: Scope,
+}
+
+/// What a reindex rebuilt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReindexReport {
+    /// How many journals were replayed.
+    pub scopes: u64,
+    /// How many entries they held.
+    pub entries: u64,
+    /// How many claims the rebuilt projections hold.
+    pub claims: u64,
+}
+
+/// Whether every journal in a tenant still verifies.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ChainReport {
+    /// True when no scope has a broken link.
+    pub ok: bool,
+    /// One report per scope with a journal, in scope order.
+    pub scopes: Vec<ScopeChain>,
+}
+
+/// One scope's journal, as verification found it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ScopeChain {
+    pub scope: Scope,
+    /// How many entries the journal holds.
+    pub entries: u64,
+    /// The last entry's hash.
+    pub head_hash: Option<String>,
+    /// The first entry that doesn't verify, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub broken_at: Option<BrokenLink>,
+}
+
+/// The first entry in a journal that doesn't verify, and why.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct BrokenLink {
+    pub seq: u64,
+    pub problem: ChainProblem,
+}
+
+/// Why an entry doesn't verify.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChainProblem {
+    /// The entry is missing: the journal skips from the entry before it to a later one.
+    MissingEntry,
+    /// The entry's content no longer matches its content hash.
+    ContentHashMismatch,
+    /// The entry doesn't link to the hash of the entry before it, so an earlier entry was
+    /// replaced or the entry was moved.
+    PrevHashMismatch,
+    /// A header field, such as the actor or the time, no longer matches the entry's hash.
+    EntryHashMismatch,
+}
+
+impl fmt::Display for ChainProblem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            ChainProblem::MissingEntry => "the entry is missing",
+            ChainProblem::ContentHashMismatch => "its content no longer matches its content hash",
+            ChainProblem::PrevHashMismatch => {
+                "it no longer links to the entry before it, so an earlier entry was replaced"
+            }
+            ChainProblem::EntryHashMismatch => {
+                "a header field, such as the actor or the time, no longer matches its hash"
+            }
+        })
+    }
 }

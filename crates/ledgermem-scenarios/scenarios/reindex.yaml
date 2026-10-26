@@ -1,0 +1,39 @@
+name: recall reads the same after an operator reindexes, and agents can't reindex
+clock: 2026-10-26T09:00:00Z
+callers:
+  coder: { kind: agent, project: billing-api, agent: claude-code }
+  operator: { kind: operator }
+steps:
+  - as: coder
+    remember:
+      subject: "service:billing-api"
+      predicate: deployed_version
+      value: "2.14.0"
+      text: "billing-api is running 2.14.0 in production"
+  - advance: 38m
+
+  - as: coder
+    recall: { query: "what version of billing-api is deployed?" }
+    expect: &recalled
+      intent: current
+      answer_set:
+        - subject: "service:billing-api"
+          predicate: deployed_version
+          value: "2.14.0"
+          text: "billing-api is running 2.14.0 in production"
+          scope: "project:billing-api"
+          status: proposed
+          trust: 0.30
+          age: 38m
+
+  - as: operator
+    reindex: {}
+    expect: { scopes: 1, entries: 1, claims: 1 }
+
+  - as: coder
+    recall: { query: "what version of billing-api is deployed?" }
+    expect: *recalled
+
+  - as: coder
+    reindex: {}
+    expect: { error: { code: permission_denied } }

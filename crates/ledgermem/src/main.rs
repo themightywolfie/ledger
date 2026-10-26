@@ -6,11 +6,16 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::{Args, Parser, Subcommand};
-use ledgermem_core::{LOCAL_TENANT, Ledger, SystemClock};
+use ledgermem_core::{
+    Caller, ChainReport, Channel, LOCAL_TENANT, Ledger, Permission, ReindexReport, SystemClock,
+};
 use ledgermem_server::mcp::{StdioLaunch, serve_stdio};
 use ledgermem_sqlite::SqliteStore;
 
 type BoxError = Box<dyn Error + Send + Sync>;
+
+/// How `verify` exits when a journal doesn't verify. Errors exit 1 and usage errors exit 2.
+const EXIT_CHAIN_BROKEN: u8 = 3;
 
 #[derive(Parser)]
 #[command(
@@ -26,6 +31,24 @@ struct Cli {
 enum Command {
     /// Serve the memory tools to one agent over MCP stdio.
     Mcp(McpArgs),
+    /// Check that every journal in the tenant still verifies. Exits 3 if any is broken.
+    Verify(OperatorArgs),
+    /// Rebuild the tenant's claims and recall index from its journals.
+    Reindex(OperatorArgs),
+}
+
+/// Commands an operator runs on the database they open.
+#[derive(Args)]
+struct OperatorArgs {
+    /// The tenant to work on.
+    #[arg(long, default_value = LOCAL_TENANT)]
+    tenant: String,
+    /// The SQLite database file. Defaults to ledgermem.db in the platform data directory.
+    #[arg(long)]
+    db: Option<PathBuf>,
+    /// Print the result as JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -53,10 +76,12 @@ struct McpArgs {
 #[tokio::main]
 async fn main() -> ExitCode {
     let result = match Cli::parse().command {
-        Command::Mcp(args) => mcp(args).await,
+        Command::Mcp(args) => mcp(args).await.map(|()| ExitCode::SUCCESS),
+        Command::Verify(args) => verify(args).await,
+        Command::Reindex(args) => reindex(args).await,
     };
     match result {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(error) => {
             eprintln!("ledgermem: {error}");
             ExitCode::FAILURE
@@ -75,6 +100,79 @@ async fn mcp(args: McpArgs) -> Result<(), BoxError> {
         relay_user: !args.no_relay_user,
     };
     serve_stdio(ledger, launch.caller()).await
+}
+
+async fn verify(args: OperatorArgs) -> Result<ExitCode, BoxError> {
+    let (ledger, operator) = open_as_operator(&args).await?;
+    let report = ledger.verify_journals(&operator).await?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_chain_report(&args.tenant, &report);
+    }
+    Ok(if report.ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(EXIT_CHAIN_BROKEN)
+    })
+}
+
+async fn reindex(args: OperatorArgs) -> Result<ExitCode, BoxError> {
+    let (ledger, operator) = open_as_operator(&args).await?;
+    let report = ledger.reindex(&operator).await?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_reindex_report(&args.tenant, &report);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The ledger behind `args`, and the local operator who runs commands on it.
+async fn open_as_operator(args: &OperatorArgs) -> Result<(Ledger, Caller), BoxError> {
+    let ledger = open_ledger(args.db.clone())?;
+    ledger.open_tenant(&args.tenant).await?;
+    let operator = Caller::operator(&args.tenant, "local", Channel::Cli).with_permissions([
+        Permission::Read,
+        Permission::Operator,
+        Permission::Admin,
+    ]);
+    Ok((ledger, operator))
+}
+
+fn print_chain_report(tenant: &str, report: &ChainReport) {
+    if report.scopes.is_empty() {
+        println!("Tenant {tenant} has no journals yet.");
+        return;
+    }
+    let scopes: Vec<String> = report.scopes.iter().map(|c| c.scope.to_string()).collect();
+    let width = scopes.iter().map(String::len).max().unwrap_or(0);
+    for (scope, chain) in scopes.iter().zip(&report.scopes) {
+        match &chain.broken_at {
+            None => println!(
+                "{scope:width$}  ok  {}  head {}",
+                count(chain.entries, "entry", "entries"),
+                chain.head_hash.as_deref().unwrap_or("-"),
+            ),
+            Some(broken) => println!(
+                "{scope:width$}  BROKEN at entry {}: {}",
+                broken.seq, broken.problem
+            ),
+        }
+    }
+}
+
+fn print_reindex_report(tenant: &str, report: &ReindexReport) {
+    println!(
+        "Rebuilt tenant {tenant} from {} ({}): {}.",
+        count(report.scopes, "journal", "journals"),
+        count(report.entries, "entry", "entries"),
+        count(report.claims, "claim", "claims"),
+    );
+}
+
+fn count(n: u64, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
 }
 
 fn open_ledger(db: Option<PathBuf>) -> Result<Ledger, BoxError> {

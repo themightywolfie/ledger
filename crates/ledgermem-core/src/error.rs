@@ -13,6 +13,9 @@ pub enum Error {
     PermissionDenied(String),
     #[error("{0}")]
     NotFound(String),
+    /// A journal doesn't verify, so nothing may be rebuilt or restored from it.
+    #[error("{0}")]
+    ChainBroken(String),
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -24,6 +27,7 @@ impl Error {
             Error::ScopeDenied(_) => "scope_denied",
             Error::PermissionDenied(_) => "permission_denied",
             Error::NotFound(_) => "not_found",
+            Error::ChainBroken(_) => "chain_broken",
             Error::Internal(_) => "internal",
         }
     }

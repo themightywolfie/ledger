@@ -1,0 +1,37 @@
+name: an operator's verify reports every scope's chain intact, and agents can't run it
+clock: 2026-10-26T09:00:00Z
+callers:
+  coder: { kind: agent, project: billing-api, agent: claude-code }
+  assistant: { kind: agent, agent: assistant }
+  operator: { kind: operator }
+steps:
+  - as: coder
+    remember:
+      subject: "service:billing-api"
+      predicate: deployed_version
+      value: "2.14.0"
+      text: "billing-api is running 2.14.0 in production"
+  - as: coder
+    remember:
+      subject: "service:billing-api"
+      predicate: owner
+      value: "team:payments"
+      text: "the payments team owns billing-api"
+  - as: assistant
+    remember:
+      subject: "user:local"
+      predicate: dietary_preference
+      value: "vegetarian"
+      text: "is vegetarian"
+
+  - as: operator
+    verify: {}
+    expect:
+      ok: true
+      scopes:
+        - { scope: "project:billing-api", entries: 2 }
+        - { scope: "user:local", entries: 1 }
+
+  - as: coder
+    verify: {}
+    expect: { error: { code: permission_denied } }

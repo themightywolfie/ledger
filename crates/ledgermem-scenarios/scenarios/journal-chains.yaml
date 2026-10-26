@@ -1,0 +1,19 @@
+name: each scope's first journal entry links to that scope's genesis hash
+clock: 2026-10-26T09:00:00Z
+callers:
+  coder: { kind: agent, project: billing-api, agent: claude-code }
+steps:
+  - as: coder
+    remember:
+      subject: "service:billing-api"
+      predicate: deployed_version
+      value: "2.14.0"
+      text: "billing-api is running 2.14.0 in production"
+    expect: { status: proposed }
+
+  # sha256("ledgermem:genesis:project:billing-api"), computed with sha256sum.
+  - as: coder
+    journal: { scope: "project:billing-api" }
+    expect:
+      - seq: 1
+        prev_hash: "sha256:d217ad0caeff5cfe701763d9f05c8f7eaa66f23c2a5b965e8402b3ef2d62533f"
