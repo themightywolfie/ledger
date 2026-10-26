@@ -277,7 +277,7 @@ prev_hash    = previous entry's entry_hash, or sha256("ledgermem:genesis:" + sco
 - `scope` is written `level:id`, such as `project:billing-api`, or `org`.
 - `recorded_at` is RFC 3339 in UTC.
 - `policy_version` is `null` and `refs` is `[]` until entries carry them, so entries sealed before then keep verifying afterwards.
-- The genesis hash names the scope but not the tenant, so a journal still verifies after it is restored into a tenant with a different name.
+- The genesis hash names the scope but not the tenant, so a journal still verifies after it is restored into a tenant with a different name (ADR-0011).
 
 Because the chain commits to `content_hash` rather than the content, **forget** can null an entry's content (and any evidence payload referenced only by forgotten claims) while every chain still verifies (ADR-0003). A `claim_forgotten` entry records the claim id, the content hashes removed, the actor and the reason. Verification accepts an entry with no content only when a later `claim_forgotten` entry in the same journal names its content hash. Any other missing content is `content_hash_mismatch`, so emptying content is never a way to tamper unnoticed.
 
