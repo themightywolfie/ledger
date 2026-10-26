@@ -108,7 +108,7 @@ A correction is not a separate operation. It is `remember` called through the vi
 - The same journal plus the same policy versions always produce the same projections (ADR-0010).
 - `recall` never waits on a verifier. `check_before_act` waits for at most its re-verification budget (2 s by default) and answers `re-verify` if the budget runs out.
 
-**Error modes** are a closed set that every surface maps to its own conventions: `ScopeDenied`, `PermissionDenied`, `NotFound`, `InvalidClaim` (with field errors), `ChainBroken` (restore and verify), `RestoreTargetNotEmpty`, `Busy` (the write queue is saturated), `VerifierUnavailable`, `Internal`.
+**Error modes** are a closed set that every surface maps to its own conventions: `ScopeDenied`, `PermissionDenied`, `NotFound`, `InvalidClaim` (with field errors), `ChainBroken` (reindex and restore refuse a journal that doesn't verify; `verify` itself reports, never fails), `RestoreTargetNotEmpty`, `Busy` (writes kept the operation from finishing, such as reindex after three interrupted attempts), `VerifierUnavailable`, `Internal`.
 
 ### What the engine hides
 
@@ -225,7 +225,7 @@ Crate boundaries enforce the seams at compile time. `ledgermem-core` cannot impo
 
 | Crate | Depends on | Notable libraries |
 | --- | --- | --- |
-| ledgermem-core | none of the others | tokio, serde, serde_json, sha2, ulid, thiserror |
+| ledgermem-core | none of the others | serde, serde_json, serde_jcs (RFC 8785), sha2, time, ulid, thiserror |
 | ledgermem-sqlite | core | rusqlite (bundled, FTS5) |
 | ledgermem-verifiers | core | gix, reqwest, quick-xml, tokio process |
 | ledgermem-models | core | fastembed (feature `local-embeddings`, default on), reqwest |

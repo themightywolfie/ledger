@@ -16,6 +16,9 @@ pub enum Error {
     /// A journal doesn't verify, so nothing may be rebuilt or restored from it.
     #[error("{0}")]
     ChainBroken(String),
+    /// Other writes kept the operation from finishing. Retrying later can succeed.
+    #[error("{0}")]
+    Busy(String),
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -28,6 +31,7 @@ impl Error {
             Error::PermissionDenied(_) => "permission_denied",
             Error::NotFound(_) => "not_found",
             Error::ChainBroken(_) => "chain_broken",
+            Error::Busy(_) => "busy",
             Error::Internal(_) => "internal",
         }
     }

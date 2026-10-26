@@ -8,10 +8,10 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use ledgermem_core::{
-    Claim, Commit, JournalEntry, Projection, Scope, Store, StoreError, genesis_hash,
+    Claim, Commit, JournalHead, Projection, Scope, Store, StoreError, StoredEntry, genesis_hash,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
-use serde_json::{Value, json};
+use serde_json::Value;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -155,24 +155,24 @@ impl Store for SqliteStore {
                 .map_err(StoreError::new)?;
             let (seq, prev_hash) = match last {
                 Some((seq, entry_hash)) => (seq + 1, entry_hash),
-                None => (1, genesis_hash(&entry.scope)),
+                None => (1, genesis_hash(&scope)),
             };
+            // Store exactly what the hashes commit to.
             let entry = entry.seal(u64::try_from(seq).map_err(StoreError::new)?, prev_hash);
-            let serialized = to_json(&entry)?;
             tx.execute(
                 "INSERT INTO entries (tenant, scope, seq, id, kind, actor, channel, recorded_at,
                                       content, content_hash, prev_hash, entry_hash)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     tenant,
-                    scope,
+                    entry.scope,
                     seq,
                     entry.id,
-                    serialized["kind"].as_str(),
+                    entry.kind,
                     entry.actor,
-                    serialized["channel"].as_str(),
-                    serialized["recorded_at"].as_str(),
-                    entry.content.to_string(),
+                    entry.channel,
+                    entry.recorded_at,
+                    entry.content,
                     entry.content_hash,
                     entry.prev_hash,
                     entry.entry_hash,
@@ -181,7 +181,7 @@ impl Store for SqliteStore {
             .map_err(StoreError::new)?;
         }
         for projection in commit.projections {
-            apply(&tx, tenant, projection)?;
+            apply_projection(&tx, tenant, projection)?;
         }
         tx.commit().map_err(StoreError::new)
     }
@@ -218,7 +218,7 @@ impl Store for SqliteStore {
             .collect()
     }
 
-    fn journal(&self, tenant: &str, scope: &Scope) -> Result<Vec<JournalEntry>, StoreError> {
+    fn journal(&self, tenant: &str, scope: &str) -> Result<Vec<StoredEntry>, StoreError> {
         let conn = self.conn()?;
         let mut statement = conn
             .prepare(
@@ -228,59 +228,52 @@ impl Store for SqliteStore {
             )
             .map_err(StoreError::new)?;
         let rows = statement
-            .query_map(params![tenant, scope.to_string()], |row| {
-                Ok(json!({
-                    "id": row.get::<_, String>(0)?,
-                    "scope": scope.to_string(),
-                    "seq": row.get::<_, i64>(1)?,
-                    "kind": row.get::<_, String>(2)?,
-                    "actor": row.get::<_, String>(3)?,
-                    "channel": row.get::<_, String>(4)?,
-                    "recorded_at": row.get::<_, String>(5)?,
-                    "content": row.get::<_, Option<String>>(6)?,
-                    "content_hash": row.get::<_, String>(7)?,
-                    "prev_hash": row.get::<_, String>(8)?,
-                    "entry_hash": row.get::<_, String>(9)?,
-                }))
+            .query_map(params![tenant, scope], |row| {
+                Ok(StoredEntry {
+                    id: row.get(0)?,
+                    scope: scope.to_owned(),
+                    // A negative number can only be tampering; verification reports it as a
+                    // missing entry.
+                    seq: u64::try_from(row.get::<_, i64>(1)?).unwrap_or(0),
+                    kind: row.get(2)?,
+                    actor: row.get(3)?,
+                    channel: row.get(4)?,
+                    recorded_at: row.get(5)?,
+                    content: row.get(6)?,
+                    content_hash: row.get(7)?,
+                    prev_hash: row.get(8)?,
+                    entry_hash: row.get(9)?,
+                })
             })
             .map_err(StoreError::new)?;
-        rows.map(|row| {
-            let mut row = row.map_err(StoreError::new)?;
-            row["content"] = match row["content"].as_str() {
-                Some(content) => serde_json::from_str(content).map_err(StoreError::new)?,
-                None => Value::Null,
-            };
-            serde_json::from_value(row).map_err(StoreError::new)
-        })
-        .collect()
+        rows.map(|entry| entry.map_err(StoreError::new)).collect()
     }
 
-    fn scopes(&self, tenant: &str) -> Result<Vec<Scope>, StoreError> {
+    fn scopes(&self, tenant: &str) -> Result<Vec<String>, StoreError> {
         let conn = self.conn()?;
         let mut statement = conn
             .prepare("SELECT DISTINCT scope FROM entries WHERE tenant = ?1 ORDER BY scope")
             .map_err(StoreError::new)?;
         let rows = statement
-            .query_map([tenant], |row| row.get::<_, String>(0))
+            .query_map([tenant], |row| row.get(0))
             .map_err(StoreError::new)?;
-        rows.map(|scope| {
-            scope
-                .map_err(StoreError::new)?
-                .parse()
-                .map_err(StoreError::new)
-        })
-        .collect()
+        rows.map(|scope| scope.map_err(StoreError::new)).collect()
     }
 
     fn replace_projections(
         &self,
         tenant: &str,
+        heads: &[JournalHead],
         projections: Vec<Projection>,
-    ) -> Result<(), StoreError> {
+    ) -> Result<bool, StoreError> {
         let mut conn = self.conn()?;
+        // Holding the write lock, no entry can land between this check and the commit.
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StoreError::new)?;
+        if journal_heads(&tx, tenant)? != heads {
+            return Ok(false);
+        }
         tx.execute(
             "DELETE FROM claims_fts WHERE rowid IN (SELECT rowid FROM claims WHERE tenant = ?1)",
             [tenant],
@@ -289,10 +282,29 @@ impl Store for SqliteStore {
         tx.execute("DELETE FROM claims WHERE tenant = ?1", [tenant])
             .map_err(StoreError::new)?;
         for projection in projections {
-            apply(&tx, tenant, projection)?;
+            apply_projection(&tx, tenant, projection)?;
         }
-        tx.commit().map_err(StoreError::new)
+        tx.commit().map_err(StoreError::new)?;
+        Ok(true)
     }
+}
+
+/// Where each of the tenant's journals ends now, in scope order.
+fn journal_heads(tx: &Transaction<'_>, tenant: &str) -> Result<Vec<JournalHead>, StoreError> {
+    let mut statement = tx
+        .prepare(
+            "SELECT scope, MAX(seq) FROM entries WHERE tenant = ?1 GROUP BY scope ORDER BY scope",
+        )
+        .map_err(StoreError::new)?;
+    let rows = statement
+        .query_map([tenant], |row| {
+            Ok(JournalHead {
+                scope: row.get(0)?,
+                seq: u64::try_from(row.get::<_, i64>(1)?).unwrap_or(0),
+            })
+        })
+        .map_err(StoreError::new)?;
+    rows.map(|head| head.map_err(StoreError::new)).collect()
 }
 
 /// Whether the database already has a journal table, however old.
@@ -305,7 +317,11 @@ fn has_journal(conn: &Connection) -> Result<bool, StoreError> {
     .map_err(StoreError::new)
 }
 
-fn apply(tx: &Transaction<'_>, tenant: &str, projection: Projection) -> Result<(), StoreError> {
+fn apply_projection(
+    tx: &Transaction<'_>,
+    tenant: &str,
+    projection: Projection,
+) -> Result<(), StoreError> {
     match projection {
         Projection::PutClaim(claim) => put_claim(tx, tenant, &claim),
     }

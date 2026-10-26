@@ -25,6 +25,7 @@ steps:
           status: proposed
           trust: 0.30
           age: 38m
+          recorded_at: "2026-10-26T09:00:00Z"
 
   - as: operator
     reindex: {}

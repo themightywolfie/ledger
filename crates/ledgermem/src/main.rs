@@ -151,7 +151,7 @@ fn print_chain_report(tenant: &str, report: &ChainReport) {
         match &chain.broken_at {
             None => println!(
                 "{scope:width$}  ok  {}  head {}",
-                count(chain.entries, "entry", "entries"),
+                plural(chain.entries, "entry", "entries"),
                 chain.head_hash.as_deref().unwrap_or("-"),
             ),
             Some(broken) => println!(
@@ -165,13 +165,13 @@ fn print_chain_report(tenant: &str, report: &ChainReport) {
 fn print_reindex_report(tenant: &str, report: &ReindexReport) {
     println!(
         "Rebuilt tenant {tenant} from {} ({}): {}.",
-        count(report.scopes, "journal", "journals"),
-        count(report.entries, "entry", "entries"),
-        count(report.claims, "claim", "claims"),
+        plural(report.scopes, "journal", "journals"),
+        plural(report.entries, "entry", "entries"),
+        plural(report.claims, "claim", "claims"),
     );
 }
 
-fn count(n: u64, one: &str, many: &str) -> String {
+fn plural(n: u64, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 

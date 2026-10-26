@@ -45,7 +45,11 @@ fn operator() -> Caller {
 /// Edits the database directly, the way someone tampering with the file would.
 fn tamper(path: &Path, sql: &str) {
     let conn = rusqlite::Connection::open(path).unwrap();
-    assert_eq!(conn.execute(sql, []).unwrap(), 1, "tampering hit no row");
+    assert_eq!(
+        conn.execute(sql, []).unwrap(),
+        1,
+        "tampering changed no entry"
+    );
 }
 
 async fn first_broken_link(ledger: &Ledger) -> Option<BrokenLink> {
@@ -149,11 +153,7 @@ async fn an_entry_forged_with_fresh_hashes_breaks_the_chain_at_the_next_entry() 
     let updated = conn
         .execute(
             "UPDATE entries SET content = ?1, content_hash = ?2, entry_hash = ?3 WHERE seq = 2",
-            rusqlite::params![
-                forged.content.to_string(),
-                forged.content_hash,
-                forged.entry_hash
-            ],
+            rusqlite::params![forged.content, forged.content_hash, forged.entry_hash],
         )
         .unwrap();
     assert_eq!(updated, 1);
@@ -163,6 +163,46 @@ async fn an_entry_forged_with_fresh_hashes_breaks_the_chain_at_the_next_entry() 
         Some(BrokenLink {
             seq: 3,
             problem: ChainProblem::PrevHashMismatch
+        })
+    );
+}
+
+#[tokio::test]
+async fn an_entry_whose_kind_was_changed_to_one_this_build_does_not_know_breaks_the_chain_there() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ledgermem.db");
+    let ledger = ledger_with_three_entries(&path).await;
+
+    tamper(
+        &path,
+        "UPDATE entries SET kind = 'claim_retracted' WHERE seq = 2",
+    );
+
+    assert_eq!(
+        first_broken_link(&ledger).await,
+        Some(BrokenLink {
+            seq: 2,
+            problem: ChainProblem::EntryHashMismatch
+        })
+    );
+}
+
+#[tokio::test]
+async fn an_entry_whose_content_was_replaced_with_something_unreadable_breaks_the_chain_there() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ledgermem.db");
+    let ledger = ledger_with_three_entries(&path).await;
+
+    tamper(
+        &path,
+        "UPDATE entries SET content = 'not json' WHERE seq = 2",
+    );
+
+    assert_eq!(
+        first_broken_link(&ledger).await,
+        Some(BrokenLink {
+            seq: 2,
+            problem: ChainProblem::ContentHashMismatch
         })
     );
 }

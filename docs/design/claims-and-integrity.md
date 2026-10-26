@@ -273,12 +273,13 @@ entry_hash   = sha256(jcs({ id, scope, seq, kind, content_hash, prev_hash,
 prev_hash    = previous entry's entry_hash, or sha256("ledgermem:genesis:" + scope) for seq 1
 ```
 
+- The content is stored as its canonical JSON text, and every header field is stored exactly as it was hashed. Verification hashes what is stored, so a tampered value is reported as a broken link even when it no longer reads as JSON or as a known kind.
 - `scope` is written `level:id`, such as `project:billing-api`, or `org`.
 - `recorded_at` is RFC 3339 in UTC.
 - `policy_version` is `null` and `refs` is `[]` until entries carry them, so entries sealed before then keep verifying afterwards.
 - The genesis hash names the scope but not the tenant, so a journal still verifies after it is restored into a tenant with a different name.
 
-Because the chain commits to `content_hash` rather than the content, **forget** can null an entry's content (and any evidence payload referenced only by forgotten claims) while every chain still verifies (ADR-0003). A `claim_forgotten` entry records the claim id, the content hashes removed, the actor and the reason.
+Because the chain commits to `content_hash` rather than the content, **forget** can null an entry's content (and any evidence payload referenced only by forgotten claims) while every chain still verifies (ADR-0003). A `claim_forgotten` entry records the claim id, the content hashes removed, the actor and the reason. Verification accepts an entry with no content only when a later `claim_forgotten` entry in the same journal names its content hash. Any other missing content is `content_hash_mismatch`, so emptying content is never a way to tamper unnoticed.
 
 **Verification** (`ledgermem verify`, the visualizer badge, every restore and every reindex) walks each journal in order and reports its first broken link: the entry's `seq` and the first of these checks that fails.
 

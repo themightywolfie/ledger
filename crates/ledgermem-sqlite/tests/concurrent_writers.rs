@@ -54,7 +54,7 @@ fn concurrent_writers_number_a_scopes_entries_without_gaps_or_failures() {
     });
 
     let seqs: Vec<u64> = stores[0]
-        .journal("local", &scope)
+        .journal("local", &scope.to_string())
         .unwrap()
         .iter()
         .map(|entry| entry.seq)

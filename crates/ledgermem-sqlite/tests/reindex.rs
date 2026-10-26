@@ -2,14 +2,16 @@
 //! as they were.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use ledgermem_core::{
-    Caller, Channel, ClaimInput, JournalQuery, Ledger, Permission, Recall, ReindexReport, Remember,
-    Scope, ScopeLevel, TestClock,
+    Caller, Channel, Claim, ClaimInput, Commit, EntryKind, JournalHead, JournalQuery, Ledger,
+    NewEntry, Permission, Projection, Recall, ReindexReport, Remember, Scope, ScopeLevel, Store,
+    StoreError, StoredEntry, TestClock,
 };
 use ledgermem_sqlite::SqliteStore;
 use serde_json::{Value, json};
+use time::OffsetDateTime;
 use time::macros::datetime;
 
 fn coder() -> Caller {
@@ -26,7 +28,7 @@ fn assistant() -> Caller {
         .with_permissions([Permission::Read, Permission::Propose])
 }
 
-fn admin() -> Caller {
+fn operator() -> Caller {
     Caller::operator("local", "test", Channel::Cli)
         .with_permissions([Permission::Operator, Permission::Admin])
 }
@@ -102,7 +104,7 @@ async fn reindex_rebuilds_lost_projections_and_reads_come_back_unchanged() {
         .unwrap();
     assert_eq!(reads(&ledger).await[0]["answer_set"], json!([]));
 
-    let report = ledger.reindex(&admin()).await.unwrap();
+    let report = ledger.reindex(&operator()).await.unwrap();
 
     assert_eq!(
         report,
@@ -131,7 +133,7 @@ async fn reindex_refuses_to_rebuild_from_a_journal_that_does_not_verify() {
         )
         .unwrap();
 
-    let error = ledger.reindex(&admin()).await.unwrap_err();
+    let error = ledger.reindex(&operator()).await.unwrap_err();
 
     assert_eq!(error.code(), "chain_broken");
     assert!(
@@ -142,5 +144,125 @@ async fn reindex_refuses_to_rebuild_from_a_journal_that_does_not_verify() {
         reads(&ledger).await[0],
         before[0],
         "recall is served from the projections as they were"
+    );
+}
+
+/// A store that lets one more write land between reindex reading the journals and replacing the
+/// projections, the way a `ledgermem mcp` process sharing the database could.
+struct InterruptedStore {
+    inner: SqliteStore,
+    late_write: Mutex<Option<Commit>>,
+}
+
+impl Store for InterruptedStore {
+    fn tenant_exists(&self, tenant: &str) -> Result<bool, StoreError> {
+        self.inner.tenant_exists(tenant)
+    }
+    fn create_tenant(&self, tenant: &str, at: OffsetDateTime) -> Result<(), StoreError> {
+        self.inner.create_tenant(tenant, at)
+    }
+    fn commit(&self, tenant: &str, commit: Commit) -> Result<(), StoreError> {
+        self.inner.commit(tenant, commit)
+    }
+    fn search(
+        &self,
+        tenant: &str,
+        scopes: &[Scope],
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<Claim>, StoreError> {
+        self.inner.search(tenant, scopes, query, limit)
+    }
+    fn journal(&self, tenant: &str, scope: &str) -> Result<Vec<StoredEntry>, StoreError> {
+        self.inner.journal(tenant, scope)
+    }
+    fn scopes(&self, tenant: &str) -> Result<Vec<String>, StoreError> {
+        self.inner.scopes(tenant)
+    }
+    fn replace_projections(
+        &self,
+        tenant: &str,
+        heads: &[JournalHead],
+        projections: Vec<Projection>,
+    ) -> Result<bool, StoreError> {
+        if let Some(late_write) = self.late_write.lock().unwrap().take() {
+            self.inner.commit(tenant, late_write)?;
+        }
+        self.inner.replace_projections(tenant, heads, projections)
+    }
+}
+
+/// A claim written straight through the store port, as another process's `remember` would.
+fn late_claim() -> Commit {
+    let content = json!({
+        "id": "clm_01LATECLAIM000000000000000",
+        "scope": "project:billing-api",
+        "subject": "service:billing-api",
+        "predicate": "deployed_version",
+        "value": "2.15.0",
+        "text": "billing-api is running 2.15.0",
+        "source": { "kind": "agent_claim", "actor": "agent:other", "channel": "agent" },
+        "status": "proposed",
+        "valid_from": "2026-10-26T09:00:00Z",
+        "valid_to": null,
+        "recorded_at": "2026-10-26T09:00:00Z",
+    });
+    Commit {
+        projections: vec![Projection::PutClaim(
+            serde_json::from_value(content.clone()).unwrap(),
+        )],
+        entries: vec![NewEntry {
+            id: "ent_01LATEENTRY000000000000000".into(),
+            scope: Scope::new(ScopeLevel::Project, "billing-api"),
+            kind: EntryKind::ClaimWritten,
+            actor: "agent:other".into(),
+            channel: Channel::Agent,
+            recorded_at: datetime!(2026-10-26 09:00 UTC),
+            content,
+        }],
+    }
+}
+
+#[tokio::test]
+async fn a_claim_written_while_reindex_runs_survives_the_rebuild() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = InterruptedStore {
+        inner: SqliteStore::open(&dir.path().join("ledgermem.db")).unwrap(),
+        late_write: Mutex::new(Some(late_claim())),
+    };
+    let clock = Arc::new(TestClock::new(datetime!(2026-10-26 09:00 UTC)));
+    let ledger = Ledger::new(Arc::new(store), clock);
+    ledger.open_tenant("local").await.unwrap();
+    ledger
+        .remember(
+            &coder(),
+            claim(
+                "deployed_version",
+                "2.14.0",
+                "billing-api is running 2.14.0",
+            ),
+        )
+        .await
+        .unwrap();
+
+    let report = ledger.reindex(&operator()).await.unwrap();
+
+    assert_eq!(
+        report.entries, 2,
+        "the rebuild includes the late entry: {report:?}"
+    );
+    let recall = Recall {
+        query: "billing-api running".into(),
+        limit: None,
+    };
+    let recalled = ledger.recall(&coder(), recall).await.unwrap();
+    let values: Vec<_> = recalled
+        .answer_set
+        .iter()
+        .map(|claim| claim.value.clone())
+        .collect();
+    assert!(
+        values.contains(&json!("2.15.0")),
+        "the late claim is still recalled: {values:?}"
     );
 }

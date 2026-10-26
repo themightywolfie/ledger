@@ -114,13 +114,14 @@ pub struct ChainReport {
     /// True when no scope has a broken link.
     pub ok: bool,
     /// One report per scope with a journal, in scope order.
-    pub scopes: Vec<ScopeChain>,
+    pub scopes: Vec<ScopeVerification>,
 }
 
 /// One scope's journal, as verification found it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct ScopeChain {
-    pub scope: Scope,
+pub struct ScopeVerification {
+    /// The scope as stored, written `level:id` or `org`.
+    pub scope: String,
     /// How many entries the journal holds.
     pub entries: u64,
     /// The last entry's hash.
