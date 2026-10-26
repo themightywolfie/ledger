@@ -10,7 +10,7 @@ Ledger is an open-source memory layer for AI agents. Recalling a fact is only ha
 
 It ships as a single Rust binary, `ledgermem`. It includes an MCP server (stdio and Streamable HTTP, MCP 2026-07-28), a REST API, a CLI, and a small web app, the **memory visualizer**, where you can see, correct, forget, back up and restore memories.
 
-> **Status: design phase.** The design is written and agreed, but there is no code yet. The specs and tickets below are the build plan. The commands below show the intended experience and don't work yet.
+> **Status: early build.** The design is written and agreed, and the first slice works: `ledgermem mcp` serves `memory_remember` and `memory_recall` over stdio. The specs and tickets below are the build plan. The other commands below show the intended experience and don't work yet.
 
 ## The intended experience
 

@@ -1,0 +1,18 @@
+[package]
+name = "ledgermem-scenarios"
+description = "Ledger's integrity scenario suite."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+ledgermem-core.workspace = true
+ledgermem-sqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+time.workspace = true
+tokio.workspace = true

@@ -1,0 +1,35 @@
+name: a caller is refused an operation it lacks permission for, and a scope outside its bounds
+clock: 2026-10-25T09:00:00Z
+callers:
+  billing: { kind: agent, project: billing-api }
+  reader: { kind: agent, project: billing-api, permissions: [read] }
+  writer: { kind: agent, project: billing-api, permissions: [propose] }
+  payments: { kind: agent, project: payments }
+steps:
+  - as: reader
+    remember:
+      subject: "service:billing-api"
+      predicate: deployed_version
+      value: "2.13.0"
+      text: "billing-api is running 2.13.0 in production"
+    expect: { error: { code: permission_denied } }
+
+  - as: writer
+    recall: { query: "billing-api" }
+    expect: { error: { code: permission_denied } }
+
+  - as: billing
+    remember:
+      subject: "service:billing-api"
+      predicate: deployed_version
+      value: "2.14.0"
+      text: "billing-api is running 2.14.0 in production"
+    expect: { status: proposed }
+
+  - as: payments
+    journal: { scope: "project:billing-api" }
+    expect: { error: { code: scope_denied } }
+
+  - as: billing
+    journal: { scope: "project:billing-api" }
+    expect: [ { seq: 1, actor: "agent:billing" } ]

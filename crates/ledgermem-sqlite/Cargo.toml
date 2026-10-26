@@ -1,0 +1,18 @@
+[package]
+name = "ledgermem-sqlite"
+description = "SQLite store adapter for the Ledger engine."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ledgermem-core.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
