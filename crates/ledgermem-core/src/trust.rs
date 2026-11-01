@@ -44,18 +44,18 @@ pub(crate) struct Standing {
     pub trusted: bool,
     /// Longer since it was last attested than its predicate's freshness allows.
     pub stale: bool,
-    /// Verified and fresh, so an adapter may place it in a model's instructions.
+    /// Trusted and fresh, so an adapter may place it in a model's instructions.
     pub injectable: bool,
 }
 
 /// How `claim` stands at `now`, under `policy`.
 pub(crate) fn standing(claim: &Claim, policy: &Policy, now: OffsetDateTime) -> Standing {
-    let verified = claim.status == Status::Verified;
     let stale = is_stale(claim, policy, now);
     let trust = score(claim, stale);
+    let trusted = claim.status == Status::Verified && trust.score >= policy.trusted_threshold();
     Standing {
-        trusted: verified && trust.score >= policy.trusted_threshold(),
-        injectable: verified && !stale,
+        injectable: trusted && !stale,
+        trusted,
         stale,
         trust,
     }

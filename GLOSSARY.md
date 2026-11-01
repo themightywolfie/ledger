@@ -118,7 +118,7 @@ Backed by at least one passing attestation.
 Verified, with a trust score at or above the trusted threshold, and not part of an open conflict set.
 
 **Injectable**:
-Verified, fresh and not contested, so an adapter may place the claim in a model's instructions. Anything else is passed only as labelled data.
+Trusted and fresh, so an adapter may place the claim in a model's instructions. Anything else is passed only as labelled data.
 
 **Promotion**:
 A proposed claim becoming verified, because a verifier passed or a permitted actor attested it.

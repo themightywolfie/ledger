@@ -45,7 +45,7 @@ steps:
         code: unresolved
         text: "unresolved: the best answer is unverified, and a high-stakes read shouldn't rest on it; verify it through a tool or ask the user"
 
-  # Verified, but below the trusted threshold, is unverified too.
+  # Verified, but below the trusted threshold, is unverified too, and isn't injectable.
   - as: assistant
     remember:
       subject: "user:local"
@@ -57,7 +57,7 @@ steps:
   - as: assistant
     recall: { query: "vegetarian" }
     expect:
-      answer_set: [{ status: verified, trusted: false, injectable: true }]
+      answer_set: [{ status: verified, trusted: false, injectable: false }]
       guidance: { code: unverified }
 
   # Once the reliable answer goes stale, it is stale, and a high-stakes read abstains.

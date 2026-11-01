@@ -133,7 +133,7 @@ stateDiagram-v2
 
 **Trusted is derived, not stored.** It is computed at every read: `trusted = status == verified ∧ trust.score ≥ trusted_threshold (default 0.80) ∧ not in an open conflict set`.
 
-**Injectable** (what adapters may place into a model's instructions) = `status == verified ∧ not stale ∧ not contested`. Everything else is returned only as labelled data.
+**Injectable** (what adapters may place into a model's instructions) = `trusted ∧ not stale`. A trusted claim is verified and not contested, so a claim below the trusted threshold, such as one only the LLM judge vouches for, is never injectable. Everything else is returned only as labelled data.
 
 ## 5. Trust score
 
@@ -268,7 +268,7 @@ Guidance is about the **best answer**, the first in the answer set. Every other 
 | `unresolved` | The best answer is contested. Or it would be `stale` or `unverified` below, and the caller set `high_stakes: true`. Every candidate is returned, and none is picked (abstention). | Instruct the model to verify through a tool or ask the user. |
 | `stale` | The best answer is verified and stale. | Pass as labelled data, with the re-verification already queued. |
 | `unverified` | The best answer isn't trusted: it is proposed, or verified but below the trusted threshold. | Pass as labelled data: "unverified: check before relying". |
-| `reliable` | The best answer is trusted and fresh, and there are no conflicts. | Inject as known. |
+| `reliable` | The best answer is injectable (trusted and fresh), and there are no conflicts. | Inject as known. |
 
 ## 10. Pre-action check
 

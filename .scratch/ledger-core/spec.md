@@ -113,7 +113,7 @@ Developers install one binary, run `ledgermem init`, and connect their agent ove
 65. As an agent making a high-stakes read, I want Ledger to abstain and return both candidates when the answer is contested, stale or unverified, so that I check or ask instead of guessing.
 66. As an agent, I want recall to match by keyword, by meaning and by subject or alias, so that I find claims however I phrase the question.
 67. As an agent builder, I want recall to answer within 150 ms at p95 locally, so that memory doesn't slow my agent down.
-68. As a framework integrator, I want each returned claim marked injectable or not, so that my adapter puts only fresh, verified, uncontested claims into instructions.
+68. As a framework integrator, I want each returned claim marked injectable or not, so that my adapter puts only fresh, trusted claims into instructions.
 69. As an agent, I want every trust score returned with its components, so that I can explain to the user why I believe something.
 70. As an auditor, I want to ask what Ledger believed at a past recorded time, so that I can reconstruct an agent's view when it acted.
 71. As an agent, I want session-scoped claims visible only when I name my session, so that one run's scratch work doesn't leak into others.

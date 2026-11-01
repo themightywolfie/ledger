@@ -221,7 +221,7 @@ pub struct RecalledClaim {
     pub age: String,
     /// Longer since it was last attested than its predicate's freshness allows.
     pub stale: bool,
-    /// Verified and fresh, so it may be placed in a model's instructions. Anything else is only
+    /// Trusted and fresh, so it may be placed in a model's instructions. Anything else is only
     /// labelled data.
     pub injectable: bool,
     #[serde(with = "time::serde::rfc3339")]
