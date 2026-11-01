@@ -1,25 +1,26 @@
 //! The Ledger engine: the one value every surface calls.
 
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use serde_json::Value;
-use time::Duration;
+use time::{Duration, OffsetDateTime};
 
 use crate::caller::{Caller, Permission};
-use crate::claim::{Claim, ClaimId, Evidence, Scope, ScopeLevel, Source, Status};
+use crate::claim::{Claim, ClaimId, Evidence, RetractionReason, Scope, ScopeLevel, Source, Status};
 use crate::clock::Clock;
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, internal};
 use crate::gate;
 use crate::journal::{self, EntryKind, JournalEntry, NewEntry, StoredEntry};
 use crate::ops::{
-    ApplyPolicy, BrokenLink, ChainReport, ClaimResult, Guidance, GuidanceCode, JournalQuery,
-    PolicyApplied, PolicyQuery, ReadIntent, ReadPack, Recall, RecalledClaim, ReindexReport,
-    Remember, RememberOutcome, ScopeVerification,
+    ApplyPolicy, Attest, AttestOutcome, BrokenLink, ChainReport, ClaimResult, Guidance,
+    GuidanceCode, JournalQuery, PolicyApplied, PolicyQuery, ReadIntent, ReadPack, Recall,
+    RecalledClaim, ReindexReport, Remember, RememberOutcome, ScopeVerification, Verification,
 };
-use crate::policy::{Policy, PolicyVersion, invalid_policy};
-use crate::store::{Commit, JournalHead, Projection, Store};
+use crate::policy::{Policy, PolicyVersion, VerifierName, invalid_policy};
+use crate::projector::{self, ClaimRetracted, Claims, EvidenceAttached, StatusChanged};
+use crate::store::{Commit, JournalHead, Store};
 use crate::trust;
+use crate::verifier::{Check, Outcome, Verifiers};
 
 /// The tenant a local install serves, created on first launch.
 pub const LOCAL_TENANT: &str = "local";
@@ -29,14 +30,30 @@ const DEFAULT_RECALL_LIMIT: usize = 10;
 /// How many times reindex reads the journals again after a write lands mid-rebuild.
 const REINDEX_ATTEMPTS: u32 = 3;
 
+/// How many times a write that depends on a claim's status reads the claim again after another
+/// write lands in its scope first.
+const WRITE_ATTEMPTS: u32 = 3;
+
 pub struct Ledger {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
+    verifiers: Verifiers,
 }
 
 impl Ledger {
     pub fn new(store: Arc<dyn Store>, clock: Arc<dyn Clock>) -> Self {
-        Ledger { store, clock }
+        Ledger {
+            store,
+            clock,
+            verifiers: Verifiers::default(),
+        }
+    }
+
+    /// Checks claims with `verifiers`. A claim whose predicate names a verifier the ledger
+    /// doesn't have stays as the write gate left it.
+    pub fn with_verifiers(mut self, verifiers: Verifiers) -> Self {
+        self.verifiers = verifiers;
+        self
     }
 
     /// Makes a tenant ready to serve. The `local` tenant is created on first launch; any other
@@ -58,14 +75,17 @@ impl Ledger {
     /// Subjects are resolved through the policy's aliases and values checked against their
     /// predicates' declared types. Each claim's source kind comes from the caller's channel and
     /// key, and the request can only lower it. If any claim fails a check, none is remembered.
+    /// The verifier a claim's predicate declares then checks it inline: a pass verifies it, a
+    /// fail retracts it as refuted, and an inconclusive result changes nothing.
     pub async fn remember(&self, caller: &Caller, req: Remember) -> Result<RememberOutcome> {
         caller.require(Permission::Propose)?;
         let now = self.clock.now();
         let scope = caller.default_write_scope();
         let policy = self.policy_in(&caller.tenant, caller.bounds.project.as_deref())?;
 
-        let mut commit = Commit::default();
-        let mut results = Vec::with_capacity(req.claims.len());
+        // Every claim passes the policy and the write gate before any verifier runs, so a request
+        // that fails a check costs no verification.
+        let mut written = Vec::with_capacity(req.claims.len());
         for (index, input) in req.claims.into_iter().enumerate() {
             let invalid = |(field, reason)| {
                 Error::InvalidClaim(format!(
@@ -76,6 +96,16 @@ impl Ledger {
                 .admit(&input.subject, &input.predicate, input.value.clone())
                 .map_err(invalid)?;
             let classified = gate::classify(caller, &input, &admitted, &policy).map_err(invalid)?;
+            let mut evidence: Vec<_> = classified
+                .evidence
+                .into_iter()
+                .map(|kind| Evidence::observed(kind, now))
+                .collect();
+            evidence.extend(
+                gate::attached_evidence(&input.evidence, now).map_err(|wrong| {
+                    Error::InvalidClaim(format!("claims[{index}].{wrong}; nothing was remembered"))
+                })?,
+            );
             let claim = Claim {
                 id: ClaimId::generate(now),
                 scope: scope.clone(),
@@ -88,23 +118,33 @@ impl Ledger {
                     actor: caller.actor.clone(),
                     channel: caller.channel,
                 },
-                evidence: classified
-                    .evidence
-                    .into_iter()
-                    .map(|kind| Evidence::observed(kind, now))
-                    .collect(),
+                evidence,
                 status: classified.status,
+                reason: None,
                 valid_from: now,
                 valid_to: None,
                 recorded_at: now,
             };
+            let hints: Vec<_> = admitted.hints.into_iter().chain(classified.hints).collect();
+            written.push((claim, hints));
+        }
+
+        let mut commit = Commit::default();
+        let mut claims = Claims::new();
+        let mut results = Vec::with_capacity(written.len());
+        for (mut claim, mut hints) in written {
+            let verification = self
+                .verify_as_written(&mut claim, &policy, &mut hints)
+                .await;
             let standing = trust::standing(&claim, &policy, now);
             results.push(ClaimResult {
                 claim_id: claim.id.clone(),
                 status: claim.status,
+                reason: claim.reason,
+                verification,
                 trusted: standing.trusted,
                 trust: standing.trust,
-                hints: admitted.hints.into_iter().chain(classified.hints).collect(),
+                hints,
             });
             let entry = NewEntry {
                 id: NewEntry::generate_id(now),
@@ -117,12 +157,187 @@ impl Ledger {
             };
             commit
                 .projections
-                .extend(projections_for(entry.kind, &entry.content)?);
+                .push(projector::project(entry.kind, &entry.content, &mut claims)?);
             commit.entries.push(entry);
         }
 
         self.store.commit(&caller.tenant, commit)?;
         Ok(RememberOutcome { results })
+    }
+
+    /// Checks a claim as it is written, unless the write gate quarantined it, and records what
+    /// the verifier found on the claim itself, so the entry that writes the claim fixes it.
+    async fn verify_as_written(
+        &self,
+        claim: &mut Claim,
+        policy: &Policy,
+        hints: &mut Vec<String>,
+    ) -> Verification {
+        if claim.status == Status::Quarantined {
+            return Verification::Unchecked;
+        }
+        let finding = match self.check(claim, policy, claim.recorded_at).await {
+            Ok(finding) => finding,
+            Err(Unchecked::Undeclared) => return Verification::Unchecked,
+            Err(unavailable) => {
+                hints.push(format!(
+                    "{}, so the claim wasn't checked",
+                    unavailable.why(claim)
+                ));
+                return Verification::Unchecked;
+            }
+        };
+        hints.extend(finding.hint);
+        if let Some(status) = status_after(claim.status, finding.outcome) {
+            claim.status = status;
+            claim.reason = (status == Status::Retracted).then_some(RetractionReason::Refuted);
+        }
+        claim.evidence.push(finding.evidence);
+        Verification::Done
+    }
+
+    /// Asks the verifier `claim`'s predicate declares what it finds now, recorded as evidence
+    /// observed at `at`, or says why nothing could.
+    async fn check(
+        &self,
+        claim: &Claim,
+        policy: &Policy,
+        at: OffsetDateTime,
+    ) -> Result<Finding, Unchecked> {
+        let predicate = policy.predicate(&claim.predicate);
+        let declared = predicate.verifier.as_ref().ok_or(Unchecked::Undeclared)?;
+        let name = &declared.verifier;
+        let verifier = self
+            .verifiers
+            .get(name)
+            .ok_or_else(|| Unchecked::Unavailable(name.clone()))?;
+        let check = Check {
+            claim,
+            params: &declared.params,
+        };
+        let observation = verifier.verify(check).await;
+        let hint = match observation.outcome {
+            Outcome::Pass => None,
+            Outcome::Fail => Some(format!("{name} refuted the claim: {}", observation.summary)),
+            Outcome::Inconclusive => Some(format!(
+                "{name} couldn't check the claim: {}",
+                observation.summary
+            )),
+        };
+        let system_of_record = predicate.system_of_record.as_ref() == Some(name);
+        Ok(Finding {
+            outcome: observation.outcome,
+            hint,
+            evidence: observation.into_evidence(name.clone(), system_of_record, at),
+        })
+    }
+
+    /// Attaches a caller's evidence to a claim, and checks the claim against its predicate's
+    /// verifier now unless asked not to. A pass verifies a proposed claim and renews a verified
+    /// one's freshness, a fail retracts it as refuted, and an inconclusive result changes
+    /// nothing. The caller's own evidence is recorded, hashed, but attests nothing.
+    pub async fn attest(&self, caller: &Caller, req: Attest) -> Result<AttestOutcome> {
+        caller.require(Permission::Attest)?;
+        let now = self.clock.now();
+        let policy = self.policy_in(&caller.tenant, caller.bounds.project.as_deref())?;
+        let (claim, head) = self.attestable(caller, &req.claim_id)?;
+
+        let mut evidence = gate::attached_evidence(&req.evidence, now)
+            .map_err(|wrong| Error::InvalidClaim(format!("{wrong}; nothing was attached")))?;
+        let mut outcome = Outcome::Inconclusive;
+        let mut hints = Vec::new();
+        if req.verify_now {
+            match self.check(&claim, &policy, now).await {
+                Ok(finding) => {
+                    outcome = finding.outcome;
+                    hints.extend(finding.hint);
+                    evidence.push(finding.evidence);
+                }
+                Err(unchecked) if evidence.is_empty() => {
+                    return Err(Error::VerifierUnavailable(format!(
+                        "{}, so Ledger can't check {}; attach the evidence you observed instead",
+                        unchecked.why(&claim),
+                        req.claim_id
+                    )));
+                }
+                Err(unchecked) => hints.push(format!(
+                    "{}, so the evidence was attached unchecked",
+                    unchecked.why(&claim)
+                )),
+            }
+        } else if evidence.is_empty() {
+            return Err(Error::InvalidClaim(
+                "evidence: attach what you observed, or ask to verify_now; nothing was attached"
+                    .into(),
+            ));
+        }
+
+        // The outcome moves the claim on from the status it has when the attestation commits,
+        // so if another write lands in its scope first, read the claim again and decide again.
+        let mut read = Some((claim, head));
+        for _ in 0..WRITE_ATTEMPTS {
+            let (claim, head) = match read.take() {
+                Some(read) => read,
+                None => self.attestable(caller, &req.claim_id)?,
+            };
+            let entries = attestation_entries(caller, &claim, evidence.clone(), outcome, now)?;
+            let mut claims = Claims::from([(claim.id.clone(), claim)]);
+            let projections = entries
+                .iter()
+                .map(|entry| projector::project(entry.kind, &entry.content, &mut claims))
+                .collect::<Result<_>>()?;
+            let commit = Commit {
+                entries,
+                projections,
+            };
+            if !self.store.commit_at(&caller.tenant, &[head], commit)? {
+                continue;
+            }
+            let claim = claims.remove(&req.claim_id).expect("the attested claim");
+            let standing = trust::standing(&claim, &policy, now);
+            return Ok(AttestOutcome {
+                claim_id: claim.id,
+                outcome,
+                status: claim.status,
+                reason: claim.reason,
+                trusted: standing.trusted,
+                trust: standing.trust,
+                evidence,
+                hints,
+            });
+        }
+        Err(Error::Busy(format!(
+            "other writes kept landing in {}'s scope while it was attested, {WRITE_ATTEMPTS} \
+             times; try again",
+            req.claim_id
+        )))
+    }
+
+    /// The claim `id` names, and where its scope's journal ends, if the caller may see it and it
+    /// is still memory.
+    fn attestable(&self, caller: &Caller, id: &ClaimId) -> Result<(Claim, JournalHead)> {
+        let visible = caller.visible_scopes();
+        let found = self
+            .store
+            .claim(&caller.tenant, id)?
+            .filter(|(claim, _)| visible.contains(&claim.scope));
+        let Some((claim, head)) = found else {
+            return Err(Error::NotFound(format!(
+                "there is no claim {id} within the scope bounds of {}",
+                caller.actor
+            )));
+        };
+        match claim.status {
+            Status::Quarantined => Err(Error::InvalidClaim(format!(
+                "{id} is quarantined: it isn't served as memory, and only an operator can \
+                 release it"
+            ))),
+            Status::Retracted => Err(Error::InvalidClaim(format!(
+                "{id} is retracted, and a retracted claim is never used again; remember it anew \
+                 if it holds now"
+            ))),
+            _ => Ok((claim, head)),
+        }
     }
 
     /// Recalls the claims that hold now and match the query, best match first, each scored at
@@ -195,7 +410,11 @@ impl Ledger {
             content: serde_json::to_value(&version).map_err(internal)?,
         };
         let commit = Commit {
-            projections: projections_for(entry.kind, &entry.content)?,
+            projections: vec![projector::project(
+                entry.kind,
+                &entry.content,
+                &mut Claims::new(),
+            )?],
             entries: vec![entry],
         };
         self.store.commit(&caller.tenant, commit)?;
@@ -277,12 +496,12 @@ impl Ledger {
         // Replay journal by journal. Every entry about a claim lives in its scope's journal,
         // because conflicts and supersession stay within one scope (ADR-0005), so replaying
         // each journal in order rebuilds every claim as live writes left it.
+        let mut claims = Claims::new();
         let mut projections = Vec::new();
         for stored in journals.into_iter().flat_map(|journal| journal.entries) {
             let entry = readable(stored)?;
-            projections.extend(projections_for(entry.kind, &entry.content)?);
+            projections.push(projector::project(entry.kind, &entry.content, &mut claims)?);
         }
-        let claims = distinct_claims(&projections);
         if !self
             .store
             .replace_projections(tenant, &heads, projections)?
@@ -292,7 +511,7 @@ impl Ledger {
         Ok(Some(ReindexReport {
             scopes: heads.len() as u64,
             entries: heads.iter().map(|head| head.seq).sum(),
-            claims,
+            claims: claims.len() as u64,
         }))
     }
 
@@ -332,16 +551,92 @@ fn readable(stored: StoredEntry) -> Result<JournalEntry> {
         .map_err(|reason| Error::Internal(format!("{reason}; run `ledgermem verify`")))
 }
 
-/// How many claims the projections put, counting each claim once.
-fn distinct_claims(projections: &[Projection]) -> u64 {
-    projections
-        .iter()
-        .filter_map(|projection| match projection {
-            Projection::PutClaim(claim) => Some(claim.id.as_str()),
-            Projection::PutPolicy(_) => None,
+/// Why nothing could check a claim.
+enum Unchecked {
+    /// The claim's predicate declares no verifier.
+    Undeclared,
+    /// It declares this one, which the ledger doesn't have.
+    Unavailable(VerifierName),
+}
+
+impl Unchecked {
+    /// Why nothing could check `claim`, in words for whoever wrote it.
+    fn why(&self, claim: &Claim) -> String {
+        match self {
+            Unchecked::Undeclared => format!("{} declares no verifier", claim.predicate),
+            Unchecked::Unavailable(name) => format!(
+                "{}'s verifier {name} isn't available on this server",
+                claim.predicate
+            ),
+        }
+    }
+}
+
+/// The entries that record an attestation of `claim`: the evidence attached, then the status the
+/// outcome moves the claim on to, if any.
+fn attestation_entries(
+    caller: &Caller,
+    claim: &Claim,
+    evidence: Vec<Evidence>,
+    outcome: Outcome,
+    at: OffsetDateTime,
+) -> Result<Vec<NewEntry>> {
+    let entry = |kind, content: Result<Value, serde_json::Error>| -> Result<NewEntry> {
+        Ok(NewEntry {
+            id: NewEntry::generate_id(at),
+            scope: claim.scope.clone(),
+            kind,
+            actor: caller.actor.clone(),
+            channel: caller.channel,
+            recorded_at: at,
+            content: content.map_err(internal)?,
         })
-        .collect::<BTreeSet<_>>()
-        .len() as u64
+    };
+    let claim_id = claim.id.clone();
+    let mut entries = vec![entry(
+        EntryKind::EvidenceAttached,
+        serde_json::to_value(EvidenceAttached {
+            claim_id: claim_id.clone(),
+            evidence,
+        }),
+    )?];
+    match status_after(claim.status, outcome) {
+        Some(Status::Retracted) => entries.push(entry(
+            EntryKind::ClaimRetracted,
+            serde_json::to_value(ClaimRetracted {
+                claim_id,
+                reason: RetractionReason::Refuted,
+            }),
+        )?),
+        Some(status) => entries.push(entry(
+            EntryKind::StatusChanged,
+            serde_json::to_value(StatusChanged { claim_id, status }),
+        )?),
+        None => {}
+    }
+    Ok(entries)
+}
+
+/// What a claim's verifier found.
+struct Finding {
+    outcome: Outcome,
+    /// The evidence that records it.
+    evidence: Evidence,
+    /// Why the claim didn't pass, for whoever wrote it.
+    hint: Option<String>,
+}
+
+/// The status a verifier's outcome moves a claim with `status` on to, if any
+/// (claims-and-integrity.md, section 4). A pass verifies a proposed claim. A fail retracts a
+/// proposed or verified claim as refuted. An inconclusive result changes nothing, and so does
+/// any outcome for a claim in another status: a contested claim leaves its conflict set only
+/// through a resolution.
+fn status_after(status: Status, outcome: Outcome) -> Option<Status> {
+    match (outcome, status) {
+        (Outcome::Pass, Status::Proposed) => Some(Status::Verified),
+        (Outcome::Fail, Status::Proposed | Status::Verified) => Some(Status::Retracted),
+        _ => None,
+    }
 }
 
 /// The scope a policy applies to: the project it overlays, or `org` for the tenant policy.
@@ -353,21 +648,6 @@ fn policy_scope(project: Option<&str>) -> Result<Scope, String> {
             Err("a project id can't be empty; name the project, such as billing-api".into())
         }
         Some(project) => Ok(Scope::new(ScopeLevel::Project, project)),
-    }
-}
-
-/// The projector: the projection updates a journal entry implies (ADR-0010). Live writes and
-/// reindex both go through it, so a rebuild lands exactly where the writes did.
-fn projections_for(kind: EntryKind, content: &Value) -> Result<Vec<Projection>> {
-    match kind {
-        EntryKind::ClaimWritten => {
-            let claim = serde_json::from_value(content.clone()).map_err(internal)?;
-            Ok(vec![Projection::PutClaim(claim)])
-        }
-        EntryKind::PolicyApplied => {
-            let version = serde_json::from_value(content.clone()).map_err(internal)?;
-            Ok(vec![Projection::PutPolicy(version)])
-        }
     }
 }
 
@@ -429,8 +709,4 @@ fn format_age(age: Duration) -> String {
         3_600..86_400 => format!("{}h", seconds / 3_600),
         _ => format!("{}d", seconds / 86_400),
     }
-}
-
-fn internal(error: impl std::fmt::Display) -> Error {
-    Error::Internal(error.to_string())
 }

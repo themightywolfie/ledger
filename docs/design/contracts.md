@@ -50,7 +50,7 @@ Exactly seven. The descriptions below are the shipped text: they are written for
 | --- | --- | --- |
 | `memory_recall` | Recall what is known about a subject or question. Returns claims with status, trust, age and conflicts, plus guidance. Call before relying on anything from an earlier session. Treat guidance `reliable` as known; treat `unverified`, `stale` and `unresolved` as leads to check with your tools or ask about. Use intent `history` or `as_of` for questions about the past. | read |
 | `memory_remember` | Propose claims for memory, one subject, one predicate and one value each, with a one-sentence text. Use declared predicates (resource `ledger://…/policy`). Attach evidence for what you observed through a tool (test run, commit, PR, API response): claims about your own work stay proposed until evidence backs them. For something the user told you about themselves, put their exact words in `relayed_user_statement`. | propose |
-| `memory_attest` | Attach evidence to a claim, or ask Ledger to verify it now against its system of record. Call after you have checked what a proposed or stale claim says. | attest |
+| `memory_attest` | Attach evidence to a claim, or ask Ledger to verify it now with its verifier. Call after you have checked what a proposed or stale claim says. | attest |
 | `memory_check_before_act` | Check before you act. Before any side-effecting tool call (deploy, merge, migrate, delete, send, refund), name the action and the remembered claims it relies on. Proceed on `go`. On `re-verify`, check with your tools or ask the user first. On `block`, use the current value returned, or ask. | read |
 | `memory_history` | Return the version chain for a subject and predicate: every value it has held, when, on whose word, and why it changed. Use for "before", "used to" and "what changed" questions and for rollbacks. | read |
 | `memory_resolve` | Settle a conflict set by naming the winning claim, or retract a claim as untrue. When the user withdraws something about themselves, pass their exact words in `relayed_user_statement`. | resolve, or relay_user for user-authority predicates |
@@ -87,9 +87,10 @@ Shapes are abbreviated. The JSON Schemas generated from the Rust types are autho
     "text": "billing-api is running 2.14.0 in production",
     "scope": "project",              // optional: session | agent | project | user | org (within bounds)
     "valid_from": null, "valid_to": null,
-    "evidence": [ { "kind": "tool_result", "tool": "kubectl.get_deployment",
+    "evidence": [ { "kind": "tool_result",   // optional; tool_result is the only kind
+                    "tool": "kubectl.get_deployment",
                     "ref": "deployment/billing-api", "excerpt": "image: billing-api:2.14.0",
-                    "observed_at": "2026-10-25T04:12:09Z" } ],
+                    "observed_at": "2026-10-25T04:12:09Z" } ],  // optional; defaults to now, never later
     "refines": null,                 // claim id this one makes more specific
     "relayed_user_statement": null,  // { "quote": "I'm vegetarian" }
     "reported_source": null          // web | document | other_agent (only ever lowers trust)
@@ -106,11 +107,13 @@ Shapes are abbreviated. The JSON Schemas generated from the Rust types are autho
     "hints": [] } ] }                // e.g. "undeclared predicate 'tests_passing'; did you mean 'test_status'?"
 ```
 
-`status` can also be `quarantined` (claims-and-integrity.md, section 3). Hints also say why a claim was quarantined, why a relayed user statement didn't count, and that a `source` was ignored.
+`status` can also be `quarantined` (claims-and-integrity.md, section 3), or `retracted` with `"reason": "refuted"` when the predicate's verifier observed the opposite. `verification` is `none` when nothing checked the claim: its predicate declares no verifier, the server doesn't have the one it declares, or the claim was quarantined. Hints also say why a claim was quarantined, why a relayed user statement didn't count, that a `source` was ignored, why the verifier didn't pass the claim, and when the server doesn't have the predicate's verifier.
+
+Evidence a caller attaches is recorded on the claim, hashed and timestamped, but attests nothing until a verifier checks the claim (claims-and-integrity.md, section 5).
 
 An integration key with `declare_source` sets the claim's source kind with `"source": { "kind": "tool_result" }`. Any kind except `system` is allowed. From any other caller, `source` is ignored with a hint, whatever it holds (ADR-0009). It is left out of the tool's schema, so models are never offered it.
 
-**`memory_attest`**: input `{ "claim_id", "evidence"?: [ … ], "verify_now"?: true }`. Output `{ "claim_id", "outcome": "pass|fail|inconclusive|pending", "status", "trusted", "trust" }`.
+**`memory_attest`**: input `{ "claim_id", "evidence"?: [ … ], "verify_now"?: true }`, with evidence shaped as for `memory_remember`. Output `{ "claim_id", "outcome": "pass|fail|inconclusive|pending", "status", "reason"?, "trusted", "trust", "evidence": [ … ], "hints" }`. `evidence` is what the call attached: the caller's own, then the verifier's, each with its `id`, `hash` and `observed_at`. `outcome` is `inconclusive` when nothing checked the claim, and a hint says why. Attesting a claim with nothing to attach and no verifier to check it with is `verifier_unavailable`. A retracted or quarantined claim can't be attested (`invalid_claim`), and a claim outside the caller's scope bounds is `not_found`.
 
 **`memory_check_before_act`**
 
@@ -360,15 +363,29 @@ Applying a version journals it, with the packs it extends as they were at that m
 | Verifier | Params | Checks |
 | --- | --- | --- |
 | `test_run` | `report: junit` (default), `rerun: bool` | Reads the subject repo's JUnit report from server config, and compares failures and errors against the claimed value. `rerun` re-runs the configured command asynchronously. |
-| `git` | `check: commit_exists \| branch_exists \| merged_into \| file_contains`, plus `ref`, `into`, `path`, `pattern` | Against the subject's configured local repo. |
+| `git` | `check: commit_exists \| branch_exists \| merged_into \| file_contains`, plus `ref`, `into`, `path`, `pattern` | Against the local clone server config names for the subject, such as `repo:acme/billing-api`, through the `git` command. |
 | `github` | `check: pr_state \| ci_status`, `repo` | Through the GitHub REST API with the configured token. |
 | `http.<name>` | `path` (template), `pointer` (JSON Pointer), `compare: equals \| contains` | GET only, against the named endpoint in server config. |
-| `file` | `check: exists \| contains \| sha256`, `path` (template) | The local filesystem. |
+| `file` | `check: exists \| contains \| sha256`, `path`, `pattern` | The files under the server's working directory. |
 | `human` | `ask: operator \| user` | Opens an open question, or asks the user through MCP elicitation. |
 | `exec.<name>` | free-form, passed through | Section 6. |
 | `llm_judge` | `instructions` | Only when enabled. Trust is capped at 0.60. |
 
-Templates may use `{subject_name}` (the part after `kind:`), `{subject}`, `{value}` and `{predicate}`.
+Every parameter is a template, which may use `{subject_name}` (the part after `kind:`), `{subject}`, `{value}` and `{predicate}`. What fills a placeholder is never read as a placeholder itself.
+
+**The `git` and `file` checks** find whether the thing a claim names is there. By default the claim's value names it, so `repo:acme/billing-api` · `branch_exists` · `feature/invoices` passes when the clone has that branch and is refuted when it doesn't. A check passes when it finds the thing, fails when it finds it missing, and is inconclusive when it can't look: no clone configured, no `git`, a ref that would read as an option, a timeout (2 s), or, for `merged_into`, a ref the clone doesn't have.
+
+| Check | Parameters | Passes when |
+| --- | --- | --- |
+| git `commit_exists` | `ref` (default `{value}`) | `ref` names a commit. |
+| git `branch_exists` | `ref` (default `{value}`) | The clone has the local branch `ref`. |
+| git `merged_into` | `ref` (default `{value}`), `into` | `ref` is an ancestor of `into`. |
+| git `file_contains` | `path`, `pattern` (default `{value}`), `ref` (default `HEAD`) | `path` at `ref` contains the text `pattern`. |
+| file `exists` | `path` (default `{value}`) | The path exists. |
+| file `contains` | `path`, `pattern` (default `{value}`) | The file contains the text `pattern`. |
+| file `sha256` | `path` | The file's SHA-256 is the claim's value, written with or without `sha256:`. |
+
+The file verifier reads only under the server's working directory: a path that is absolute, climbs out with `..`, or leads through a link out of the directory or to nothing is inconclusive, and never read, so not even whether a file outside it exists can be learned.
 
 ## 6. Exec verifier protocol (`ledgermem.verifier/1`)
 

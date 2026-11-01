@@ -8,6 +8,8 @@ use serde_json::Value;
 use time::OffsetDateTime;
 
 use crate::caller::Channel;
+use crate::policy::VerifierName;
+use crate::verifier::Outcome;
 
 /// One structured statement about the world, as it stands in memory.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -24,6 +26,9 @@ pub struct Claim {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<Evidence>,
     pub status: Status,
+    /// Why the claim was retracted, once it is. Written only then, like `evidence`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<RetractionReason>,
     #[serde(with = "time::serde::rfc3339")]
     pub valid_from: OffsetDateTime,
     #[serde(with = "time::serde::rfc3339::option")]
@@ -33,12 +38,12 @@ pub struct Claim {
 }
 
 impl Claim {
-    /// When something last attested the claim, or when it was recorded if nothing has.
+    /// When something last attested the claim, or when it was recorded if nothing has. Evidence
+    /// that doesn't attest it, such as a verifier that couldn't look, doesn't count.
     pub fn last_attested_at(&self) -> OffsetDateTime {
-        // Every kind of evidence so far attests the claim. Once a verifier can come back
-        // inconclusive (ticket #06), only passing evidence counts here.
         self.evidence
             .iter()
+            .filter(|evidence| evidence.kind.strength().is_some())
             .map(|evidence| evidence.observed_at)
             .max()
             .unwrap_or(self.recorded_at)
@@ -46,8 +51,9 @@ impl Claim {
 }
 
 /// A claim identifier: `clm_` followed by a ULID.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct ClaimId(String);
 
 impl ClaimId {
@@ -150,16 +156,60 @@ pub enum EvidenceKind {
     /// An agent reported the user's exact words about the user's own preferences or identity,
     /// holding relay_user.
     RelayedUserStatement { quote: String },
+    /// A verifier checked the claim against a real system.
+    Verifier {
+        verifier: VerifierName,
+        outcome: Outcome,
+        /// Whether the verifier is the predicate's system of record, whose word beats any
+        /// actor's narration.
+        system_of_record: bool,
+        /// What the verifier saw that decided the outcome.
+        observed: Value,
+        /// What it found, in a sentence for people.
+        summary: String,
+        /// `sha256:` over the canonical JSON of `observed` and `summary`, fixing what was seen.
+        hash: String,
+    },
+    /// What a caller observed through one of its own tools. Nothing has checked it, so it
+    /// attests nothing.
+    ToolResult {
+        /// The tool, such as `kubectl.get_deployment`.
+        tool: String,
+        /// What the tool looked at, such as `deployment/billing-api`.
+        #[serde(rename = "ref", default, skip_serializing_if = "Option::is_none")]
+        reference: Option<String>,
+        /// What it returned that bears on the claim.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        excerpt: Option<String>,
+        /// `sha256:` over the canonical JSON of `tool`, `ref` and `excerpt`.
+        hash: String,
+    },
 }
 
 impl EvidenceKind {
-    /// How strongly the evidence attests the claim (claims-and-integrity.md, section 5).
-    pub fn strength(&self) -> f64 {
+    /// How strongly the evidence attests the claim (claims-and-integrity.md, section 5), or None
+    /// when it doesn't attest it: a verifier that failed or couldn't look, or a caller's evidence
+    /// nothing has checked.
+    pub fn strength(&self) -> Option<f64> {
         match self {
-            EvidenceKind::HumanConfirmation => 0.90,
-            EvidenceKind::RelayedUserStatement { .. } => 0.80,
+            EvidenceKind::HumanConfirmation => Some(0.90),
+            EvidenceKind::RelayedUserStatement { .. } => Some(0.80),
+            EvidenceKind::Verifier {
+                outcome: Outcome::Pass,
+                system_of_record,
+                ..
+            } => Some(if *system_of_record { 0.95 } else { 0.85 }),
+            EvidenceKind::Verifier { .. } | EvidenceKind::ToolResult { .. } => None,
         }
     }
+}
+
+/// Why a claim was retracted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetractionReason {
+    /// A verifier observed the opposite of what the claim says.
+    Refuted,
 }
 
 /// Where a claim stands in its lifecycle.

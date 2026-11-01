@@ -9,6 +9,7 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::fmt;
 
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
@@ -150,7 +151,7 @@ pub struct VerifierRef {
 }
 
 /// A built-in verifier, or an `http.<name>` or `exec.<name>` instance from the server config.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct VerifierName(String);
 
@@ -466,6 +467,12 @@ impl TryFrom<String> for VerifierName {
 impl From<VerifierName> for String {
     fn from(name: VerifierName) -> Self {
         name.0
+    }
+}
+
+impl fmt::Display for VerifierName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
     }
 }
 

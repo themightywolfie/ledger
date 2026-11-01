@@ -1,17 +1,19 @@
 //! Reindexing rebuilds every projection from the journals (ADR-0010), and reads come back exactly
 //! as they were.
 
-use std::path::Path;
-use std::sync::{Arc, Mutex};
+mod common;
 
+use std::path::Path;
+use std::sync::Arc;
+
+use common::LateWriteStore;
 use ledgermem_core::{
-    ApplyPolicy, Caller, Channel, Claim, ClaimInput, Commit, EntryKind, JournalHead, JournalQuery,
-    Ledger, NewEntry, Permission, PolicyQuery, PolicyVersion, Projection, Recall, ReindexReport,
-    Remember, Scope, ScopeLevel, Store, StoreError, StoredEntry, StoredJournal, TestClock,
+    ApplyPolicy, Caller, Channel, ClaimInput, Commit, EntryKind, JournalQuery, Ledger, NewEntry,
+    Permission, PolicyQuery, Projection, Recall, ReindexReport, Remember, Scope, ScopeLevel,
+    TestClock,
 };
 use ledgermem_sqlite::SqliteStore;
 use serde_json::{Value, json};
-use time::OffsetDateTime;
 use time::macros::datetime;
 
 fn coder() -> Caller {
@@ -190,54 +192,6 @@ async fn reindex_rebuilds_the_policy_in_effect_from_the_versions_journaled() {
     assert_eq!(ledger.policy(&coder(), query()).await.unwrap(), before);
 }
 
-/// A store that lets one more write land between reindex reading the journals and replacing the
-/// projections, the way a `ledgermem mcp` process sharing the database could.
-struct InterruptedStore {
-    inner: SqliteStore,
-    late_write: Mutex<Option<Commit>>,
-}
-
-impl Store for InterruptedStore {
-    fn tenant_exists(&self, tenant: &str) -> Result<bool, StoreError> {
-        self.inner.tenant_exists(tenant)
-    }
-    fn create_tenant(&self, tenant: &str, at: OffsetDateTime) -> Result<(), StoreError> {
-        self.inner.create_tenant(tenant, at)
-    }
-    fn commit(&self, tenant: &str, commit: Commit) -> Result<(), StoreError> {
-        self.inner.commit(tenant, commit)
-    }
-    fn search(
-        &self,
-        tenant: &str,
-        scopes: &[Scope],
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<Claim>, StoreError> {
-        self.inner.search(tenant, scopes, query, limit)
-    }
-    fn policies(&self, tenant: &str, scopes: &[Scope]) -> Result<Vec<PolicyVersion>, StoreError> {
-        self.inner.policies(tenant, scopes)
-    }
-    fn journal(&self, tenant: &str, scope: &str) -> Result<Vec<StoredEntry>, StoreError> {
-        self.inner.journal(tenant, scope)
-    }
-    fn journals(&self, tenant: &str) -> Result<Vec<StoredJournal>, StoreError> {
-        self.inner.journals(tenant)
-    }
-    fn replace_projections(
-        &self,
-        tenant: &str,
-        heads: &[JournalHead],
-        projections: Vec<Projection>,
-    ) -> Result<bool, StoreError> {
-        if let Some(late_write) = self.late_write.lock().unwrap().take() {
-            self.inner.commit(tenant, late_write)?;
-        }
-        self.inner.replace_projections(tenant, heads, projections)
-    }
-}
-
 /// A claim written straight through the store port, as another process's `remember` would.
 fn late_claim() -> Commit {
     let content = json!({
@@ -272,10 +226,8 @@ fn late_claim() -> Commit {
 #[tokio::test]
 async fn a_claim_written_while_reindex_runs_survives_the_rebuild() {
     let dir = tempfile::tempdir().unwrap();
-    let store = InterruptedStore {
-        inner: SqliteStore::open(&dir.path().join("ledgermem.db")).unwrap(),
-        late_write: Mutex::new(Some(late_claim())),
-    };
+    let store = LateWriteStore::new(SqliteStore::open(&dir.path().join("ledgermem.db")).unwrap());
+    *store.late_write.lock().unwrap() = Some(late_claim());
     let clock = Arc::new(TestClock::new(datetime!(2026-10-26 09:00 UTC)));
     let ledger = Ledger::new(Arc::new(store), clock);
     ledger.open_tenant("local").await.unwrap();

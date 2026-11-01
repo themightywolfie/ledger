@@ -26,9 +26,10 @@ predicates:
     system_of_record: github
     verifier: { use: github, params: { check: ci_status } }
     agent_claims: require_evidence
+  # A repository subject, and the name of a branch it has.
   branch_exists:
-    cardinality: single
-    value_type: boolean
+    cardinality: multi
+    value_type: text
     freshness: volatile
     system_of_record: git
     verifier: { use: git, params: { check: branch_exists } }

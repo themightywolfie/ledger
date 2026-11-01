@@ -13,6 +13,7 @@ repository = "https://github.com/themightywolfie/ledger"
 ledgermem-core = { path = "crates/ledgermem-core" }
 ledgermem-sqlite = { path = "crates/ledgermem-sqlite" }
 ledgermem-server = { path = "crates/ledgermem-server" }
+ledgermem-verifiers = { path = "crates/ledgermem-verifiers" }
 
 caseless = "0.2"
 clap = { version = "4.6", features = ["derive"] }

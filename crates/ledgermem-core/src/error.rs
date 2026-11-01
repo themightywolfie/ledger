@@ -25,6 +25,9 @@ pub enum Error {
     /// Other writes kept the operation from finishing. Retrying later can succeed.
     #[error("{0}")]
     Busy(String),
+    /// A claim was to be checked, and nothing on this server can check it.
+    #[error("{0}")]
+    VerifierUnavailable(String),
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -40,9 +43,15 @@ impl Error {
             Error::InvalidPolicy(_) => "invalid_policy",
             Error::ChainBroken(_) => "chain_broken",
             Error::Busy(_) => "busy",
+            Error::VerifierUnavailable(_) => "verifier_unavailable",
             Error::Internal(_) => "internal",
         }
     }
+}
+
+/// `error` as an internal error: a fault no caller can fix, such as content that no longer reads.
+pub(crate) fn internal(error: impl std::fmt::Display) -> Error {
+    Error::Internal(error.to_string())
 }
 
 impl From<StoreError> for Error {

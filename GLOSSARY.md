@@ -69,8 +69,11 @@ Evidence consisting of the user's own words, which counts only for predicates th
 An agent's report of the user's exact words. It counts as a user statement only for predicates the user has authority over, and only from an actor permitted to relay.
 
 **Attestation**:
-One act of checking a claim against reality, whose outcome is recorded as evidence.
+One act of checking a claim against reality, whose outcome is recorded as evidence: a pass, a fail that refutes the claim, or an inconclusive result that changes nothing.
 _Avoid_: validation, fact-check
+
+**Refuted**:
+Said of a claim a verifier observed the opposite of. It is retracted, with the evidence that refuted it attached.
 
 **Verifier**:
 A read-only check that attests claims of a declared shape against a real system: a test run, a Git repository, an HTTP endpoint, a file, a cluster, or a human.
@@ -101,7 +104,7 @@ Agreement with a claim from an independent source. Repeats from the same source 
 How quickly claims about a predicate go out of date: stable, slow or volatile, each with a default re-verify interval.
 
 **Stale**:
-Said of a claim whose last attestation is older than its freshness class allows.
+Said of a claim whose last passing attestation is older than its freshness class allows.
 
 ## Lifecycle
 

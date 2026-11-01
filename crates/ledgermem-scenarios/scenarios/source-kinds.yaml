@@ -41,7 +41,10 @@ steps:
       value: passing
       text: "billing-api's CI is passing"
       source: { kind: tool_result }
-    expect: { status: proposed, trust: { score: 0.60 }, hints: [] }
+    expect:
+      status: proposed
+      trust: { score: 0.60 }
+      hints: ["ci_status's verifier github isn't available on this server, so the claim wasn't checked"]
 
   # Without declare_source, an integration's word on its source is ignored too.
   - as: plain_adapter
@@ -54,7 +57,9 @@ steps:
     expect:
       status: proposed
       trust: { score: 0.30 }
-      hints: ["source is ignored: a claim's source kind comes from the channel and key that wrote it, so this claim is recorded as agent_claim"]
+      hints:
+        - "source is ignored: a claim's source kind comes from the channel and key that wrote it, so this claim is recorded as agent_claim"
+        - "pr_state's verifier github isn't available on this server, so the claim wasn't checked"
 
   # System claims come only from Ledger's own re-verification.
   - as: adapter

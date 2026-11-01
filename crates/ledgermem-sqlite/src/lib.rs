@@ -8,8 +8,8 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use ledgermem_core::{
-    Claim, Commit, JournalHead, PolicyVersion, Projection, Scope, Store, StoreError, StoredEntry,
-    StoredJournal, genesis_hash,
+    Claim, ClaimId, Commit, JournalHead, PolicyVersion, Projection, Scope, Store, StoreError,
+    StoredEntry, StoredJournal, genesis_hash,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::Value;
@@ -161,12 +161,27 @@ impl Store for SqliteStore {
     }
 
     fn commit(&self, tenant: &str, commit: Commit) -> Result<(), StoreError> {
+        self.commit_at(tenant, &[], commit).map(drop)
+    }
+
+    fn commit_at(
+        &self,
+        tenant: &str,
+        heads: &[JournalHead],
+        commit: Commit,
+    ) -> Result<bool, StoreError> {
         let mut conn = self.conn()?;
-        // Take the write lock before reading the scope's last entry, so a writer in another
-        // process can't number or chain the same entry.
+        // Take the write lock before reading any journal's end, so a writer in another process
+        // can't land an entry between this check and the commit, or number or chain the same
+        // entry.
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StoreError::new)?;
+        for head in heads {
+            if journal_end(&tx, tenant, &head.scope)? != head.seq {
+                return Ok(false);
+            }
+        }
         for entry in commit.entries {
             let scope = entry.scope.to_string();
             let last: Option<(i64, String)> = tx
@@ -208,7 +223,42 @@ impl Store for SqliteStore {
         for projection in commit.projections {
             apply_projection(&tx, tenant, projection)?;
         }
-        tx.commit().map_err(StoreError::new)
+        tx.commit().map_err(StoreError::new)?;
+        Ok(true)
+    }
+
+    fn claim(
+        &self,
+        tenant: &str,
+        id: &ClaimId,
+    ) -> Result<Option<(Claim, JournalHead)>, StoreError> {
+        let conn = self.conn()?;
+        // One statement reads one snapshot, so the claim and its journal's end agree.
+        let found = conn
+            .query_row(
+                "SELECT c.body, c.scope,
+                        (SELECT COALESCE(MAX(e.seq), 0) FROM entries e
+                         WHERE e.tenant = c.tenant AND e.scope = c.scope)
+                 FROM claims c WHERE c.tenant = ?1 AND c.id = ?2",
+                params![tenant, id.as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(StoreError::new)?;
+        let Some((body, scope, seq)) = found else {
+            return Ok(None);
+        };
+        let head = JournalHead {
+            scope,
+            seq: u64::try_from(seq).map_err(StoreError::new)?,
+        };
+        Ok(Some((from_json(&body)?, head)))
     }
 
     fn search(
@@ -229,7 +279,7 @@ impl Store for SqliteStore {
                  WHERE claims_fts MATCH ?1
                    AND c.tenant = ?2
                    AND c.scope IN (SELECT value FROM json_each(?3))
-                   AND c.status <> 'quarantined'
+                   AND c.status NOT IN ('quarantined', 'retracted')
                  ORDER BY bm25(claims_fts), c.id
                  LIMIT ?4",
             )
@@ -359,6 +409,18 @@ fn stored_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredEntry> {
         prev_hash: row.get(9)?,
         entry_hash: row.get(10)?,
     })
+}
+
+/// The sequence number of the last entry in one scope's journal, or 0 when it has none.
+fn journal_end(tx: &Transaction<'_>, tenant: &str, scope: &str) -> Result<u64, StoreError> {
+    let seq: i64 = tx
+        .query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM entries WHERE tenant = ?1 AND scope = ?2",
+            params![tenant, scope],
+            |row| row.get(0),
+        )
+        .map_err(StoreError::new)?;
+    u64::try_from(seq).map_err(StoreError::new)
 }
 
 /// Where each of the tenant's journals ends now, in scope order.

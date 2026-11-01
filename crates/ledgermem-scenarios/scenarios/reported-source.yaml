@@ -42,7 +42,10 @@ steps:
       text: "the review agent reports billing-api's CI is failing"
       source: { kind: other_agent }
       reported_source: document
-    expect: { status: proposed, trust: { score: 0.25 }, hints: [] }
+    expect:
+      status: proposed
+      trust: { score: 0.25 }
+      hints: ["ci_status's verifier github isn't available on this server, so the claim wasn't checked"]
 
   # A person passing on what a web page says is passing on the web.
   - as: operator

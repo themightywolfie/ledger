@@ -4,7 +4,7 @@
 use std::error::Error as StdError;
 use std::sync::Arc;
 
-use ledgermem_core::{Caller, Ledger, Permission, Recall, Remember};
+use ledgermem_core::{Attest, Caller, Ledger, Permission, Recall, Remember};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Implementation, ServerCapabilities, ServerConfig};
@@ -15,6 +15,8 @@ use serde_json::json;
 const RECALL_DESCRIPTION: &str = "Recall what is known about a subject or question. Returns claims with status, trust, age and conflicts, plus guidance. Call before relying on anything from an earlier session. Treat guidance `reliable` as known; treat `unverified`, `stale` and `unresolved` as leads to check with your tools or ask about. Use intent `history` or `as_of` for questions about the past.";
 
 const REMEMBER_DESCRIPTION: &str = "Propose claims for memory, one subject, one predicate and one value each, with a one-sentence text. Use declared predicates (resource `ledger://…/policy`). Attach evidence for what you observed through a tool (test run, commit, PR, API response): claims about your own work stay proposed until evidence backs them. For something the user told you about themselves, put their exact words in `relayed_user_statement`.";
+
+const ATTEST_DESCRIPTION: &str = "Attach evidence to a claim, or ask Ledger to verify it now with its verifier. Call after you have checked what a proposed or stale claim says.";
 
 /// The launch arguments that bind a stdio server.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +90,14 @@ impl LedgerMcp {
         Parameters(req): Parameters<Remember>,
     ) -> Result<CallToolResult, ErrorData> {
         Ok(tool_result(self.ledger.remember(&self.caller, req).await))
+    }
+
+    #[tool(name = "memory_attest", description = ATTEST_DESCRIPTION)]
+    async fn memory_attest(
+        &self,
+        Parameters(req): Parameters<Attest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Ok(tool_result(self.ledger.attest(&self.caller, req).await))
     }
 }
 

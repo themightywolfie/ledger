@@ -65,7 +65,7 @@ Source kind is derived from the channel and the actor's permissions, never from 
 - **`source` in a request** is ignored, whatever it holds, with a hint saying so, from anyone but an integration holding `declare_source`. So a prompt-injected agent that labels a claim `user_stated` writes an `agent_claim`.
 - **A reported source only lowers.** The claim takes whichever of the channel's kind and the reported kind is less trusted, in the order of the prior table below, so `reported_source` can never raise a claim's trust.
 - **A relayed user statement counts** only from a caller with `relay_user`, on a user-authority predicate, and about the user the caller is bound to (`user:local` for a default stdio server): the user's word settles their own preferences and identity, not someone else's. One that counts makes the claim `verified`, with the relayed statement as its evidence (strength 0.80, section 5). The claim's source kind stays `agent_claim`. One that doesn't count still writes the claim as the agent's own, `proposed`, with a hint saying why. An empty quote is rejected with `InvalidClaim`.
-- **Write-time evidence** (a human confirmation, a relayed user statement) is part of the journal entry it arrives in, so the entry's hash fixes it. Evidence from verifiers will also carry the hash of what was observed.
+- **Write-time evidence** (a human confirmation, a relayed user statement, what the predicate's verifier found, evidence the caller attached) is part of the journal entry it arrives in, so the entry's hash fixes it. Evidence from a verifier also carries `sha256:` over the canonical JSON of what it observed and its summary, and a caller's evidence over its `tool`, `ref` and `excerpt`.
 
 | Source kind | Source prior *default* |
 | --- | --- |
@@ -109,6 +109,7 @@ A quarantined claim is journaled like any other write, with status `quarantined`
 stateDiagram-v2
   [*] --> proposed: written, no passing attestation yet
   [*] --> verified: written with an inline pass, or a user statement / human confirmation
+  [*] --> retracted: written with an inline fail (refuted)
   [*] --> quarantined: write gate (section 3)
   proposed --> verified: promotion (verifier pass, or attestation by a permitted actor)
   proposed --> retracted: refuted by a verifier, or lost a resolution
@@ -158,7 +159,16 @@ ceiling       = 0.60 if the only passing attestation is llm_judge, else 1.00
 
 **Independence.** Two sources corroborate only if they have different actors **and** at most one of them is `agent_claim` or `other_agent`. Agents repeating each other never add up to consensus. Repeats from the same actor count once.
 
-**A failing attestation** (a verifier that observes the opposite) retracts the claim, with reason `refuted`. An inconclusive result changes nothing and is recorded as evidence with outcome `inconclusive`.
+**Verification.** The verifier a predicate declares checks each claim as it is written, inline, unless the write gate quarantined it, and `memory_attest` checks it again on request.
+
+- **A pass** verifies a proposed claim. A claim already verified stays verified, attested anew.
+- **A fail** (the verifier observes the opposite) retracts a proposed or verified claim with reason `refuted`, and the evidence that refuted it attached. A retracted claim is never recalled or attested again. A contested claim leaves its conflict set only through a resolution, so a fail there is recorded and decides nothing on its own.
+- **An inconclusive result** (a timeout, a missing tool, a ref the verifier can't find) changes nothing, and is recorded as evidence with outcome `inconclusive`.
+- **A verifier the server doesn't have** leaves the claim as the write gate left it, with a hint saying so. Attesting such a claim with no evidence to attach is `verifier_unavailable`.
+
+Evidence a caller attaches, from its own tools, is recorded and hashed with strength 0: it attests nothing until a verifier checks the claim. Only passing evidence counts toward `attestation` and toward when the claim was last attested (section 6), so neither an inconclusive check nor a caller's own evidence raises trust or keeps a claim fresh.
+
+An attestation decides from the claim as it stands when it commits. If another write lands in the claim's scope first, it reads the claim again, so a claim another process refuted meanwhile is never brought back.
 
 **Worked outcomes:**
 
@@ -181,7 +191,7 @@ Every score is returned with its components so the visualizer and `memory_recall
 | slow | 90 days |
 | volatile | 1 hour |
 
-A predicate's `reverify_after` replaces its class's interval, and gives even a `stable` predicate one. Undeclared predicates are `slow`. A claim is **stale** when `now − last_attested_at > interval`, or, for a claim that has never been attested, `now − recorded_at > interval`. A claim is still fresh at the very end of its interval. Staleness is computed at read time from the clock port. Nothing sweeps on a timer in v1. `recall` enqueues re-verification for stale volatile claims it returns, and `check_before_act` re-verifies inline.
+A predicate's `reverify_after` replaces its class's interval, and gives even a `stable` predicate one. Undeclared predicates are `slow`. A claim is **stale** when `now − last_attested_at > interval`, where `last_attested_at` is when its latest passing attestation was observed, or, for a claim no passing attestation backs, `now − recorded_at > interval`. A claim is still fresh at the very end of its interval. Staleness is computed at read time from the clock port. Nothing sweeps on a timer in v1. `recall` enqueues re-verification for stale volatile claims it returns, and `check_before_act` re-verifies inline.
 
 ## 7. Relation classification (write time)
 
@@ -290,6 +300,8 @@ Each verdict carries a reason per claim. An empty `relies_on` returns `go` with 
 Each **scope** (tenant + level + id) has one journal, a sequence of entries numbered from 1. Tenant-wide entries (policy versions and alias declarations) live in the org-scope journal, and a project overlay's versions in that project's journal.
 
 **Entry kinds:** `claim_written`, `evidence_attached`, `status_changed`, `claim_superseded`, `conflict_opened`, `conflict_resolved`, `claim_retracted`, `question_opened`, `question_answered`, `claim_forgotten`, `policy_applied`, `quarantine_released`.
+
+A claim's inline check is part of its `claim_written` entry. An attestation appends `evidence_attached` (`{ claim_id, evidence }`), then `status_changed` (`{ claim_id, status }`) when it verifies a proposed claim, or `claim_retracted` (`{ claim_id, reason }`) when it refutes one, all in the claim's scope's journal.
 
 **Hashing** uses SHA-256 over RFC 8785 canonical JSON, written as `sha256:` followed by 64 lowercase hex digits:
 

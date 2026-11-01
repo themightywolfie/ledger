@@ -2,7 +2,7 @@
 
 use time::OffsetDateTime;
 
-use crate::claim::{Claim, Scope};
+use crate::claim::{Claim, ClaimId, Scope};
 use crate::journal::{NewEntry, StoredEntry};
 use crate::policy::PolicyVersion;
 
@@ -17,9 +17,23 @@ pub trait Store: Send + Sync {
     /// updates. Everything commits together or not at all.
     fn commit(&self, tenant: &str, commit: Commit) -> Result<(), StoreError>;
 
+    /// Commits like [`Store::commit`], but only if each journal in `heads` still ends where it
+    /// says. Returns false, changing nothing, if a write landed in one since.
+    fn commit_at(
+        &self,
+        tenant: &str,
+        heads: &[JournalHead],
+        commit: Commit,
+    ) -> Result<bool, StoreError>;
+
+    /// The claim `id` names as it stands now, and where its scope's journal ends, read as one
+    /// snapshot. None when the tenant has no such claim.
+    fn claim(&self, tenant: &str, id: &ClaimId)
+    -> Result<Option<(Claim, JournalHead)>, StoreError>;
+
     /// Full-text search over claim text and subject within the given scopes, best match first.
     /// Equally good matches come in claim id order, so results don't depend on storage order.
-    /// Quarantined claims are never served as memory, so search never returns one.
+    /// Quarantined and retracted claims are never served as memory, so search never returns one.
     fn search(
         &self,
         tenant: &str,
