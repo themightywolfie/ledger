@@ -4,6 +4,7 @@ use time::OffsetDateTime;
 
 use crate::claim::{Claim, Scope};
 use crate::journal::{NewEntry, StoredEntry};
+use crate::policy::PolicyVersion;
 
 /// Durable storage for journals and their projections.
 pub trait Store: Send + Sync {
@@ -25,6 +26,10 @@ pub trait Store: Send + Sync {
         query: &str,
         limit: usize,
     ) -> Result<Vec<Claim>, StoreError>;
+
+    /// The policy version in effect in each of `scopes` that has one, the last applied there,
+    /// in the order of `scopes`. Read as one snapshot, so an apply never lands between them.
+    fn policies(&self, tenant: &str, scopes: &[Scope]) -> Result<Vec<PolicyVersion>, StoreError>;
 
     /// Every entry in one scope's journal, exactly as stored, in sequence order. `scope` is
     /// written `level:id` or `org`.
@@ -74,6 +79,8 @@ pub struct Commit {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Projection {
     PutClaim(Claim),
+    /// Makes a policy version the one in effect in its scope.
+    PutPolicy(PolicyVersion),
 }
 
 #[derive(Debug, thiserror::Error)]

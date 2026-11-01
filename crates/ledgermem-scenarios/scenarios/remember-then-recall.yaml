@@ -9,7 +9,8 @@ steps:
       predicate: deployed_version
       value: "2.14.0"
       text: "billing-api is running 2.14.0 in production"
-    expect: { status: proposed, trust: 0.30 }
+    # With no policy applied there is no vocabulary to converge on, so no hints.
+    expect: { status: proposed, trust: 0.30, hints: [] }
 
   - as: coder
     journal: { scope: "project:billing-api" }

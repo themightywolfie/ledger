@@ -1,0 +1,80 @@
+name: a project overlay adds and replaces predicates on top of the tenant policy, for that project only
+clock: 2026-11-01T09:00:00Z
+policy:
+  version: 1
+  extends: [software-delivery]
+  subjects:
+    aliases:
+      "service:billing-api": ["service:billing", "repo:acme/billing-api"]
+  resolution: { trust_margin: 0.30 }
+callers:
+  operator: { kind: operator }
+  coder: { kind: agent, project: billing-api }
+  payments: { kind: agent, project: payments }
+steps:
+  # Aliases are tenant-wide, so every scope resolves a subject the same way.
+  - as: operator
+    apply_policy:
+      project: billing-api
+      document:
+        version: 1
+        subjects:
+          aliases:
+            "service:billing-v2": ["service:billing-api"]
+    expect: { error: { code: invalid_policy, message: "invalid policy at subjects: aliases are tenant-wide, so a project overlay can't declare them; declare them in the tenant policy; nothing was applied" } }
+
+  - as: operator
+    apply_policy:
+      project: billing-api
+      document:
+        version: 1
+        predicates:
+          deployed_version: { value_type: version, freshness: slow }
+          rollout_percent: { value_type: number, freshness: volatile }
+        resolution: { on_unresolved: ask_user }
+    expect: { scope: "project:billing-api", predicates: 2, aliases: 0 }
+
+  - as: coder
+    show_policy: { project: billing-api }
+    expect: &overlaid
+      versions: [ { scope: org }, { scope: "project:billing-api" } ]
+      packs: [software-delivery]
+      subjects:
+        aliases:
+          "service:billing-api": ["service:billing", "repo:acme/billing-api"]
+      predicates:
+        deployed_version: { cardinality: single, value_type: version, freshness: slow }
+        rollout_percent: { value_type: number, freshness: volatile }
+        test_status: { value_type: { enum: [passing, failing] } }
+      resolution: { trust_margin: 0.30, on_unresolved: ask_user }
+
+  - as: coder
+    show_policy: {}
+    expect:
+      versions: [ { scope: org } ]
+      predicates:
+        deployed_version: { freshness: volatile }
+      resolution: { trust_margin: 0.30, on_unresolved: contested }
+
+  - as: payments
+    show_policy: { project: billing-api }
+    expect: { error: { code: scope_denied } }
+
+  - as: operator
+    show_policy: { project: billing-api }
+    expect: *overlaid
+
+  - as: coder
+    journal: { scope: "project:billing-api" }
+    expect:
+      - seq: 1
+        kind: policy_applied
+        content: { scope: "project:billing-api", document: { predicates: { rollout_percent: { value_type: number } } } }
+
+  - as: operator
+    reindex: {}
+    expect: { scopes: 2, entries: 2, claims: 0 }
+
+  - as: coder
+    show_policy: { project: billing-api }
+    expect: *overlaid

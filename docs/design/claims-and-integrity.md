@@ -33,9 +33,9 @@ The rules the Ledger engine enforces. Everything here is deterministic: given th
 
 **Identifiers** are ULIDs with a type prefix: `clm_` claim, `ent_` entry, `evd_` evidence, `cfs_` conflict set, `qst_` open question, `pol_` policy version, `ten_` tenant, `key_` API key.
 
-**Subjects** are canonical strings `kind:name` (for example `service:billing-api`, `user:u_42`, `repo:acme/billing-api`), trimmed and lower-cased. Before any comparison, a subject is first mapped through the policy's declared aliases. Ledger only *suggests* aliases (by name similarity, shown in the visualizer) and never merges subjects on its own.
+**Subjects** are canonical strings `kind:name` (for example `service:billing-api`, `user:u_42`, `repo:acme/billing-api`), trimmed and lower-cased. A claim whose subject isn't written `kind:name` is rejected with `InvalidClaim`. Before any comparison, a subject is first mapped through the policy's declared aliases, which are tenant-wide. A claim is stored under the subject its aliases resolved to when it was written, and a comparison maps both sides through the aliases in effect, so an alias declared later still applies to earlier claims. Ledger only *suggests* aliases (by name similarity, shown in the visualizer) and never merges subjects on its own.
 
-**Values** are one of: text, number, boolean, datetime, version, subject reference, or enum member. A predicate may declare its value type. Comparison is type-aware:
+**Values** are one of: text, number, boolean, datetime, version, subject reference, or enum member. A predicate may declare its value type, and a value that doesn't fit it is rejected with `InvalidClaim`, naming what the predicate takes: text, version and enum values are strings, datetimes are RFC 3339, and a subject is `kind:name` or `{ "type": "subject", "v": "kind:name" }`. A subject value is stored resolved through the aliases. Comparison is type-aware:
 
 | Type | Equal when |
 | --- | --- |
@@ -46,7 +46,7 @@ The rules the Ledger engine enforces. Everything here is deterministic: given th
 | version | Equal as semver (with `v` prefix and missing patch tolerated). Otherwise compared as text. |
 | subject | Equal after alias resolution. |
 | enum | Identical member. Values outside the declared set are rejected with `InvalidClaim`. |
-| undeclared | Identical JSON after canonicalization. |
+| undeclared | Identical JSON after canonicalization (RFC 8785), with subject references resolved. |
 
 **Valid time** defaults to `valid_from = recorded_at` and `valid_to = null` (open-ended) when the caller doesn't supply them.
 
@@ -174,7 +174,7 @@ The engine compares a new claim **N** against each live claim **E** (status prop
 | 5 | `N.valid_from > E.valid_from` and E is open-ended | temporal update | Run the resolution policy. If N wins, E is **superseded**: its `valid_to` is set to `N.valid_from`. |
 | 6 | anything else (same moment, or N overlaps E from earlier) | contradiction | Run the resolution policy. The loser is **retracted** with reason `lost_resolution`. |
 
-Undeclared predicates are treated as single-valued with `slow` freshness and no verifier, and `memory_remember` returns a hint naming the nearest declared predicate. Cross-scope disagreement is not a relation, and is handled by shadowing at read time (ADR-0005).
+Undeclared predicates are treated as single-valued with `slow` freshness and no verifier. When the policy declares any predicates, `memory_remember` returns a hint for a claim on an undeclared one: it names the declared predicate whose name is most alike (Jaro-Winkler similarity of at least 0.84), or, if none is close, says how the predicate is treated until the policy declares it. Cross-scope disagreement is not a relation, and is handled by shadowing at read time (ADR-0005).
 
 ## 8. Resolution policy
 
@@ -260,7 +260,7 @@ Each verdict carries a reason per claim. An empty `relies_on` returns `go` with 
 
 ## 11. Journal and hashing
 
-Each **scope** (tenant + level + id) has one journal, a sequence of entries numbered from 1. Tenant-wide entries (policy versions and alias declarations) live in the org-scope journal.
+Each **scope** (tenant + level + id) has one journal, a sequence of entries numbered from 1. Tenant-wide entries (policy versions and alias declarations) live in the org-scope journal, and a project overlay's versions in that project's journal.
 
 **Entry kinds:** `claim_written`, `evidence_attached`, `status_changed`, `claim_superseded`, `conflict_opened`, `conflict_resolved`, `claim_retracted`, `question_opened`, `question_answered`, `claim_forgotten`, `policy_applied`, `quarantine_released`.
 

@@ -230,7 +230,7 @@ The design documents (see Further Notes) hold the exact rules and contracts. The
 - Backup bundle format `ledgermem.backup/1`: a gzip-compressed tar of the manifest, per-scope journals, evidence metadata, policy versions and the forget register. Restore into an empty tenant only.
 - Exec verifier protocol `ledgermem.verifier/1`: claim and params on stdin, outcome, observed value and evidence on stdout, with a timeout and a stdout cap.
 
-**Storage (SQLite adapter)**: truth tables (entries, evidence, policy versions, tenants, keys), projection tables (claims, conflict sets, questions, full-text index, vectors) and an operational job queue. A single writer per tenant assigns sequence numbers and chain hashes. Reads are concurrent. Vector search starts as an in-process cosine scan behind an internal seam of the adapter.
+**Storage (SQLite adapter)**: truth tables (entries, evidence, tenants, keys), projection tables (the policy in effect in each scope, claims, conflict sets, questions, full-text index, vectors) and an operational job queue. A single writer per tenant assigns sequence numbers and chain hashes. Reads are concurrent. Vector search starts as an in-process cosine scan behind an internal seam of the adapter.
 
 **Predicate packs**: software delivery (deployed version, test status, PR state, CI status, branch exists, migration status, owner, uses dependency, decision) and personal assistant (lives in, works at, dietary preference, timezone, preferred name, prefers). Each declares cardinality, value type, freshness, authority and a default verifier where one applies.
 
@@ -245,7 +245,7 @@ The design documents (see Further Notes) hold the exact rules and contracts. The
    ```yaml
    name: unverified "tests pass" is refuted, and a deploy that relies on it is blocked
    clock: 2026-10-25T09:00:00Z
-   policy: { extends: [software-delivery] }
+   policy: { version: 1, extends: [software-delivery] }
    callers:
      coder: { kind: agent, project: billing-api, permissions: [read, propose, attest] }
    verifiers:

@@ -5,9 +5,9 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use ledgermem_core::{
-    Caller, Channel, Claim, ClaimInput, Commit, EntryKind, JournalHead, JournalQuery, Ledger,
-    NewEntry, Permission, Projection, Recall, ReindexReport, Remember, Scope, ScopeLevel, Store,
-    StoreError, StoredEntry, StoredJournal, TestClock,
+    ApplyPolicy, Caller, Channel, Claim, ClaimInput, Commit, EntryKind, JournalHead, JournalQuery,
+    Ledger, NewEntry, Permission, PolicyQuery, PolicyVersion, Projection, Recall, ReindexReport,
+    Remember, Scope, ScopeLevel, Store, StoreError, StoredEntry, StoredJournal, TestClock,
 };
 use ledgermem_sqlite::SqliteStore;
 use serde_json::{Value, json};
@@ -147,6 +147,52 @@ async fn reindex_refuses_to_rebuild_from_a_journal_that_does_not_verify() {
     );
 }
 
+#[tokio::test]
+async fn reindex_rebuilds_the_policy_in_effect_from_the_versions_journaled() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ledgermem.db");
+    let ledger = ledger_with_claims(&path).await;
+    // The second tenant version replaces the first, and the project overlays the second.
+    let versions = [
+        (None, "version: 1\nextends: [software-delivery]\n"),
+        (None, "version: 1\nextends: [personal-assistant]\n"),
+        (
+            Some("billing-api"),
+            "version: 1\npredicates:\n  rollout_percent: { value_type: number }\n",
+        ),
+    ];
+    for (project, document) in versions {
+        let apply = ApplyPolicy {
+            document: document.into(),
+            project: project.map(Into::into),
+        };
+        ledger.apply_policy(&operator(), apply).await.unwrap();
+    }
+    let query = || PolicyQuery {
+        project: Some("billing-api".into()),
+    };
+    let before = ledger.policy(&coder(), query()).await.unwrap();
+    assert_eq!(before.packs, ["personal-assistant"]);
+
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch("DELETE FROM policies;")
+        .unwrap();
+    assert!(
+        ledger
+            .policy(&coder(), query())
+            .await
+            .unwrap()
+            .versions
+            .is_empty()
+    );
+
+    let report = ledger.reindex(&operator()).await.unwrap();
+
+    assert_eq!(report.entries, 6, "three claims and three policy versions");
+    assert_eq!(ledger.policy(&coder(), query()).await.unwrap(), before);
+}
+
 /// A store that lets one more write land between reindex reading the journals and replacing the
 /// projections, the way a `ledgermem mcp` process sharing the database could.
 struct InterruptedStore {
@@ -172,6 +218,9 @@ impl Store for InterruptedStore {
         limit: usize,
     ) -> Result<Vec<Claim>, StoreError> {
         self.inner.search(tenant, scopes, query, limit)
+    }
+    fn policies(&self, tenant: &str, scopes: &[Scope]) -> Result<Vec<PolicyVersion>, StoreError> {
+        self.inner.policies(tenant, scopes)
     }
     fn journal(&self, tenant: &str, scope: &str) -> Result<Vec<StoredEntry>, StoreError> {
         self.inner.journal(tenant, scope)

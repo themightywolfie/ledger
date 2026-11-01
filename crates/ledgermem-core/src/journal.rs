@@ -25,6 +25,7 @@ use crate::ops::{BrokenLink, ChainProblem};
 #[serde(rename_all = "snake_case")]
 pub enum EntryKind {
     ClaimWritten,
+    PolicyApplied,
 }
 
 /// An entry the engine has built and the store has not yet sealed into its scope's chain.
@@ -215,8 +216,9 @@ struct Header<'a> {
     recorded_at: &'a str,
     actor: &'a str,
     channel: &'a str,
-    // Policy versions arrive with ticket #03, and references between entries later. Every entry
-    // seals with none until then, so the entries written now keep verifying once they exist.
+    // Resolution entries will name the policy version that decided them, and entries will refer to
+    // each other. Every entry seals with neither until then, so the entries written now keep
+    // verifying once they exist.
     policy_version: Option<&'a str>,
     refs: &'a [String],
 }

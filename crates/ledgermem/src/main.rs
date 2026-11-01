@@ -1,16 +1,18 @@
 //! The `ledgermem` binary: the CLI, and the wiring of adapters into the engine.
 
 use std::error::Error;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::{Args, Parser, Subcommand};
 use ledgermem_core::{
-    Caller, ChainReport, Channel, LOCAL_TENANT, Ledger, Permission, ReindexReport, SystemClock,
+    ApplyPolicy, Caller, ChainReport, Channel, LOCAL_TENANT, Ledger, Permission, PolicyApplied,
+    PolicyQuery, PredicatePack, ReindexReport, SystemClock,
 };
 use ledgermem_server::mcp::{StdioLaunch, serve_stdio};
 use ledgermem_sqlite::SqliteStore;
+use serde::Serialize;
 
 type BoxError = Box<dyn Error + Send + Sync>;
 
@@ -35,6 +37,37 @@ enum Command {
     Verify(OperatorArgs),
     /// Rebuild the tenant's claims and recall index from its journals.
     Reindex(OperatorArgs),
+    /// Apply or show the tenant's policy, or list the predicate packs a policy can extend.
+    #[command(subcommand)]
+    Policy(PolicyCommand),
+}
+
+#[derive(Subcommand)]
+enum PolicyCommand {
+    /// Apply a policy file to the tenant, or to one project as an overlay on the tenant's policy.
+    Apply {
+        /// The policy document, written in YAML.
+        file: PathBuf,
+        /// The project to overlay.
+        #[arg(long)]
+        project: Option<String>,
+        #[command(flatten)]
+        operator: OperatorArgs,
+    },
+    /// Show the policy in effect for the tenant, or for one project with its overlay.
+    Show {
+        /// The project whose overlay to include.
+        #[arg(long)]
+        project: Option<String>,
+        #[command(flatten)]
+        operator: OperatorArgs,
+    },
+    /// List the predicate packs a policy can extend.
+    Packs {
+        /// Print the packs as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Commands an operator runs on the database they open.
@@ -79,6 +112,15 @@ async fn main() -> ExitCode {
         Command::Mcp(args) => mcp(args).await.map(|()| ExitCode::SUCCESS),
         Command::Verify(args) => verify(args).await,
         Command::Reindex(args) => reindex(args).await,
+        Command::Policy(PolicyCommand::Apply {
+            file,
+            project,
+            operator,
+        }) => apply_policy(&file, project, operator).await,
+        Command::Policy(PolicyCommand::Show { project, operator }) => {
+            show_policy(project, operator).await
+        }
+        Command::Policy(PolicyCommand::Packs { json }) => list_packs(json),
     };
     match result {
         Ok(code) => code,
@@ -105,11 +147,9 @@ async fn mcp(args: McpArgs) -> Result<(), BoxError> {
 async fn verify(args: OperatorArgs) -> Result<ExitCode, BoxError> {
     let (ledger, operator) = open_as_operator(&args).await?;
     let report = ledger.verify_journals(&operator).await?;
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        print_chain_report(&args.tenant, &report);
-    }
+    print(args.json, &report, |report| {
+        print_chain_report(&args.tenant, report);
+    })?;
     Ok(if report.ok {
         ExitCode::SUCCESS
     } else {
@@ -120,12 +160,58 @@ async fn verify(args: OperatorArgs) -> Result<ExitCode, BoxError> {
 async fn reindex(args: OperatorArgs) -> Result<ExitCode, BoxError> {
     let (ledger, operator) = open_as_operator(&args).await?;
     let report = ledger.reindex(&operator).await?;
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        print_reindex_report(&args.tenant, &report);
-    }
+    print(args.json, &report, |report| {
+        print_reindex_report(&args.tenant, report);
+    })?;
     Ok(ExitCode::SUCCESS)
+}
+
+async fn apply_policy(
+    file: &Path,
+    project: Option<String>,
+    args: OperatorArgs,
+) -> Result<ExitCode, BoxError> {
+    let document = std::fs::read_to_string(file)
+        .map_err(|error| format!("can't read {}: {error}", file.display()))?;
+    let (ledger, operator) = open_as_operator(&args).await?;
+    let applied = ledger
+        .apply_policy(&operator, ApplyPolicy { document, project })
+        .await?;
+    print(args.json, &applied, print_policy_applied)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn show_policy(project: Option<String>, args: OperatorArgs) -> Result<ExitCode, BoxError> {
+    let (ledger, operator) = open_as_operator(&args).await?;
+    let policy = ledger.policy(&operator, PolicyQuery { project }).await?;
+    print(args.json, &policy, |policy| {
+        print!(
+            "{}",
+            serde_yaml::to_string(policy).expect("a policy serializes as YAML")
+        );
+    })?;
+    Ok(ExitCode::SUCCESS)
+}
+
+fn list_packs(json: bool) -> Result<ExitCode, BoxError> {
+    print(json, &PredicatePack::all(), |packs| {
+        let width = packs.iter().map(|pack| pack.name.len()).max().unwrap_or(0);
+        for pack in packs {
+            let predicates: Vec<_> = pack.predicates.keys().map(String::as_str).collect();
+            println!("{:width$}  {}", pack.name, predicates.join(", "));
+        }
+    })?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Prints a command's outcome: as JSON with `--json`, and otherwise as `text` writes it.
+fn print<T: Serialize>(json: bool, outcome: &T, text: impl FnOnce(&T)) -> Result<(), BoxError> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(outcome)?);
+    } else {
+        text(outcome);
+    }
+    Ok(())
 }
 
 /// The ledger behind `args`, and the local operator who runs commands on it.
@@ -168,6 +254,16 @@ fn print_reindex_report(tenant: &str, report: &ReindexReport) {
         plural(report.scopes, "journal", "journals"),
         plural(report.entries, "entry", "entries"),
         plural(report.claims, "claim", "claims"),
+    );
+}
+
+fn print_policy_applied(applied: &PolicyApplied) {
+    println!(
+        "Applied policy {} to {}: {}, {}.",
+        applied.policy_version,
+        applied.scope,
+        plural(applied.predicates, "predicate", "predicates"),
+        plural(applied.aliases, "alias", "aliases"),
     );
 }
 

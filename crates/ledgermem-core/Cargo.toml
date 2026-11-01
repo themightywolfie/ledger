@@ -12,11 +12,16 @@ repository.workspace = true
 schemars = ["dep:schemars"]
 
 [dependencies]
+caseless.workspace = true
 schemars = { workspace = true, optional = true }
 serde.workspace = true
 serde_jcs.workspace = true
 serde_json.workspace = true
+serde_path_to_error.workspace = true
+serde_yaml.workspace = true
 sha2.workspace = true
+strsim.workspace = true
 thiserror.workspace = true
 time.workspace = true
 ulid.workspace = true
+unicode-normalization.workspace = true
