@@ -13,6 +13,7 @@ schemars = ["dep:schemars"]
 
 [dependencies]
 caseless.workspace = true
+regex.workspace = true
 schemars = { workspace = true, optional = true }
 serde.workspace = true
 serde_jcs.workspace = true

@@ -1,0 +1,92 @@
+name: a claim's source kind comes from the channel and key that wrote it, never from the request
+clock: 2026-11-01T09:00:00Z
+policy: { version: 1, extends: [software-delivery] }
+callers:
+  coder: { kind: agent, project: billing-api }
+  adapter: { kind: integration, project: billing-api }
+  plain_adapter: { kind: integration, project: billing-api, permissions: [read, propose] }
+  operator: { kind: operator, permissions: [read, propose] }
+steps:
+  # An agent that says the user stated something is still an agent.
+  - as: coder
+    remember:
+      subject: "service:billing-api"
+      predicate: deployed_version
+      value: "2.14.0"
+      text: "billing-api is running 2.14.0 in production"
+      source: { kind: user_stated }
+    expect:
+      status: proposed
+      trust: 0.30
+      hints: ["source is ignored: a claim's source kind comes from the channel and key that wrote it, so this claim is recorded as agent_claim"]
+
+  # Whatever an agent puts in source is ignored, not only a kind.
+  - as: coder
+    remember:
+      subject: "service:billing-api"
+      predicate: deployed_version
+      value: "2.14.0"
+      text: "billing-api is running 2.14.0 in production"
+      source: { kind: user_stated, actor: "user:local", channel: user }
+    expect:
+      status: proposed
+      trust: 0.30
+      hints: ["source is ignored: a claim's source kind comes from the channel and key that wrote it, so this claim is recorded as agent_claim"]
+
+  # An integration with declare_source says where its claims came from.
+  - as: adapter
+    remember:
+      subject: "service:billing-api"
+      predicate: ci_status
+      value: passing
+      text: "billing-api's CI is passing"
+      source: { kind: tool_result }
+    expect: { status: proposed, trust: 0.60, hints: [] }
+
+  # Without declare_source, an integration's word on its source is ignored too.
+  - as: plain_adapter
+    remember:
+      subject: "service:billing-api"
+      predicate: pr_state
+      value: merged
+      text: "the billing-api release PR is merged"
+      source: { kind: user_stated }
+    expect:
+      status: proposed
+      trust: 0.30
+      hints: ["source is ignored: a claim's source kind comes from the channel and key that wrote it, so this claim is recorded as agent_claim"]
+
+  # System claims come only from Ledger's own re-verification.
+  - as: adapter
+    remember:
+      subject: "service:billing-api"
+      predicate: ci_status
+      value: passing
+      text: "billing-api's CI is passing"
+      source: { kind: system }
+    expect: { error: { code: invalid_claim, message: "claims[0].source.kind: an integration can't declare system, which only Ledger's own re-verification writes; declare user_stated, tool_result, document, web, agent_claim or other_agent; nothing was remembered" } }
+
+  # A person writing through the command line states the claim themselves.
+  - as: operator
+    remember:
+      subject: "service:billing-api"
+      predicate: deployed_version
+      value: "2.14.0"
+      text: "billing-api is running 2.14.0 in production"
+    expect: { status: verified, trust: 0.90, hints: [] }
+
+  - as: coder
+    journal: { scope: "project:billing-api" }
+    expect:
+      - content: { predicate: deployed_version, source: { kind: agent_claim, actor: "agent:coder", channel: agent } }
+      - content: { predicate: deployed_version, source: { kind: agent_claim, actor: "agent:coder", channel: agent } }
+      - content: { predicate: ci_status, source: { kind: tool_result, actor: "integration:adapter", channel: integration } }
+      - content: { predicate: pr_state, source: { kind: agent_claim, actor: "integration:plain_adapter", channel: integration } }
+
+  - as: operator
+    journal: { scope: org }
+    expect:
+      - kind: policy_applied
+      - content:
+          source: { kind: user_stated, actor: "operator:operator", channel: cli }
+          evidence: [ { kind: human_confirmation, observed_at: "2026-11-01T09:00:00Z" } ]

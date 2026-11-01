@@ -229,6 +229,7 @@ impl Store for SqliteStore {
                  WHERE claims_fts MATCH ?1
                    AND c.tenant = ?2
                    AND c.scope IN (SELECT value FROM json_each(?3))
+                   AND c.status <> 'quarantined'
                  ORDER BY bm25(claims_fts), c.id
                  LIMIT ?4",
             )

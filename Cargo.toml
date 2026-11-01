@@ -17,6 +17,7 @@ ledgermem-server = { path = "crates/ledgermem-server" }
 caseless = "0.2"
 clap = { version = "4.6", features = ["derive"] }
 dirs = "7.0"
+regex = "1.13"
 rmcp = { version = "3.7", default-features = false }
 rusqlite = { version = "0.41", features = ["bundled"] }
 schemars = "1.0"

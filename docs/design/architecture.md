@@ -98,7 +98,7 @@ A correction is not a separate operation. It is `remember` called through the vi
 | tenant | The one tenant this caller may touch. |
 | actor | Who is acting (`agent:claude-code`, `operator:samaksh`, `integration:langgraph`). |
 | channel | agent, integration, visualizer, cli, elicitation (see ADR-0009). |
-| permissions | Some of: read, propose, attest, resolve, forget, relay_user, operator, admin. |
+| permissions | Some of: read, propose, attest, resolve, forget, relay_user, declare_source, operator, admin. |
 | scope bounds | The widest scopes the caller may read and write (org; user id; project id; agent id). Calls may only narrow these, for example to a session. |
 
 **Invariants the interface promises:**
@@ -142,7 +142,7 @@ sequenceDiagram
 
   S->>G: remember(caller, claims)
   G->>G: classify: source kind from channel + permissions,<br/>scope within caller bounds, freshness from policy
-  G->>G: quarantine directives from web/document/other_agent
+  G->>G: quarantine overreach from web/document/other_agent,<br/>and directives that aren't the user's own word
   alt verifier declared and cheap (< 300 ms)
     G->>V: verify inline
     V-->>G: pass / fail / inconclusive + evidence
@@ -226,7 +226,7 @@ Crate boundaries enforce the seams at compile time. `ledgermem-core` cannot impo
 
 | Crate | Depends on | Notable libraries |
 | --- | --- | --- |
-| ledgermem-core | none of the others | serde, serde_json, serde_jcs (RFC 8785), serde_yaml and serde_path_to_error (policy documents), sha2, time, ulid, thiserror, strsim (predicate hints), unicode-normalization and caseless (text comparison) |
+| ledgermem-core | none of the others | serde, serde_json, serde_jcs (RFC 8785), serde_yaml and serde_path_to_error (policy documents), sha2, time, ulid, thiserror, strsim (predicate hints), unicode-normalization and caseless (text comparison), regex (directive rules) |
 | ledgermem-sqlite | core | rusqlite (bundled, FTS5) |
 | ledgermem-verifiers | core | gix, reqwest, quick-xml, tokio process |
 | ledgermem-models | core | fastembed (feature `local-embeddings`, default on), reqwest |
@@ -267,7 +267,7 @@ Formats for both are in [contracts.md](contracts.md).
 
 - Tenant isolation is enforced in the engine on every operation, not in prompts or surfaces.
 - API keys are random 32-byte tokens shown once and stored as argon2 hashes. Permissions are separate, so a proposer key can write `proposed` claims but cannot attest, resolve or forget.
-- Source kind is derived, never supplied (ADR-0009). Directives from web, document or other-agent sources are quarantined.
+- Source kind is derived, never supplied (ADR-0009). Directives that aren't the user's own word are quarantined, and so are web, document or other-agent claims on what is the user's to state or tells agents what to do.
 - `ledgermem serve` binds to `127.0.0.1` by default. Binding elsewhere requires an explicit flag and logs a warning when no TLS terminator is configured.
 - Exec verifiers run without a shell, with a timeout and an environment allow-list, but are **not sandboxed** in v1 (ADR-0006).
 - Per-scope encryption at rest and PII redaction are out of scope for v1. Forget is in scope.
