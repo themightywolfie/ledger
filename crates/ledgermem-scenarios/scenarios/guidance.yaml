@@ -1,0 +1,76 @@
+name: every read says how far its best answer can be relied on, and a high-stakes read abstains rather than lean on a weak one
+clock: 2026-11-01T09:00:00Z
+policy: { version: 1, extends: [software-delivery, personal-assistant], trust: { trusted_threshold: 0.85 } }
+callers:
+  person: { kind: operator, permissions: [read, propose] }
+  assistant: { kind: agent, permissions: [read, propose, relay_user] }
+  coder: { kind: agent, project: billing-api }
+  reviewer: { kind: agent, project: billing-api, agent: reviewer }
+steps:
+  - as: coder
+    recall: { query: "hotfix" }
+    expect:
+      answer_set: []
+      guidance: { code: none, text: "no memory: say you don't know rather than guess" }
+
+  # A verified, trusted and fresh answer is reliable, however much rides on it.
+  - as: person
+    remember: { subject: "service:billing-api", predicate: deployed_version, value: "2.14.0", text: "billing-api is running 2.14.0 in production" }
+  - as: person
+    recall: { query: "running" }
+    expect:
+      guidance: { code: reliable, text: "verified and fresh: rely on it as known" }
+  - as: person
+    recall: { query: "running", high_stakes: true }
+    expect:
+      guidance: { code: reliable }
+
+  # Two agents each report a hotfix, and neither has evidence. A high-stakes read abstains,
+  # returning both candidates. (They are about different services, so they don't contradict
+  # each other.)
+  - as: coder
+    remember: { subject: "service:billing-api", predicate: hotfix_version, value: "2.14.1", text: "the billing-api hotfix shipped as 2.14.1" }
+  - as: reviewer
+    remember: { subject: "service:payments-api", predicate: hotfix_version, value: "3.2.1", text: "the payments-api hotfix shipped as 3.2.1" }
+  - as: coder
+    recall: { query: "hotfix" }
+    expect:
+      answer_set: [{ status: proposed }, { status: proposed }]
+      guidance: { code: unverified, text: "unverified: check it with your tools or ask the user before relying on it" }
+  - as: coder
+    recall: { query: "hotfix", high_stakes: true }
+    expect:
+      answer_set: [{ status: proposed }, { status: proposed }]
+      guidance:
+        code: unresolved
+        text: "unresolved: the best answer is unverified, and a high-stakes read shouldn't rest on it; verify it through a tool or ask the user"
+
+  # Verified, but below the trusted threshold, is unverified too, and isn't injectable.
+  - as: assistant
+    remember:
+      subject: "user:local"
+      predicate: dietary_preference
+      value: vegetarian
+      text: "the user is vegetarian"
+      relayed_user_statement: { quote: "I'm vegetarian" }
+    expect: { status: verified, trusted: false, trust: { score: 0.80 } }
+  - as: assistant
+    recall: { query: "vegetarian" }
+    expect:
+      answer_set: [{ status: verified, trusted: false, injectable: false }]
+      guidance: { code: unverified }
+
+  # Once the reliable answer goes stale, it is stale, and a high-stakes read abstains.
+  - advance: 61m
+  - as: person
+    recall: { query: "running" }
+    expect:
+      answer_set: [{ status: verified, stale: true }]
+      guidance: { code: stale, text: "stale: it was last checked longer ago than its freshness allows, so check it before relying on it" }
+  - as: person
+    recall: { query: "running", high_stakes: true }
+    expect:
+      answer_set: [{ status: verified, stale: true }]
+      guidance:
+        code: unresolved
+        text: "unresolved: the best answer is stale, and a high-stakes read shouldn't rest on it; verify it through a tool or ask the user"

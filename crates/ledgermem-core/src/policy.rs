@@ -13,8 +13,8 @@ use std::collections::BTreeMap;
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value};
-use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use time::{Duration, OffsetDateTime};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::claim::{Scope, ScopeLevel};
@@ -38,6 +38,13 @@ const PACKS: [(&str, &str); 2] = [
 /// How alike an undeclared predicate and a declared one must be, by Jaro-Winkler similarity, for
 /// remember to suggest the declared one.
 const HINT_SIMILARITY: f64 = 0.84;
+
+/// The score at or above which a verified claim is trusted, unless the policy sets another.
+const DEFAULT_TRUSTED_THRESHOLD: f64 = 0.80;
+
+/// How long slow and volatile claims stay fresh, unless the policy sets otherwise.
+const DEFAULT_SLOW_INTERVAL: &str = "90d";
+const DEFAULT_VOLATILE_INTERVAL: &str = "1h";
 
 /// The verifiers a predicate can name without a server-config instance.
 const BUILT_IN_VERIFIERS: [&str; 6] = ["test_run", "git", "github", "file", "human", "llm_judge"];
@@ -484,6 +491,22 @@ impl From<Interval> for String {
     }
 }
 
+impl Interval {
+    /// How long the interval is. One too long to represent lasts as long as a duration can.
+    fn duration(&self) -> Duration {
+        let (count, unit) = self.0.split_at(self.0.len() - 1);
+        let unit_seconds: i64 = match unit {
+            "s" => 1,
+            "m" => 60,
+            "h" => 3_600,
+            // An interval is only ever read with one of these four units.
+            _ => 86_400,
+        };
+        let count = count.parse::<i64>().unwrap_or(i64::MAX);
+        Duration::seconds(count.saturating_mul(unit_seconds))
+    }
+}
+
 impl PolicyVersion {
     /// Parses and validates `text` as a policy document applied to `scope` at `at`.
     pub(crate) fn new(scope: Scope, text: &str, at: OffsetDateTime) -> Result<Self> {
@@ -516,11 +539,11 @@ impl Default for Policy {
                 on_unresolved: Some(OnUnresolved::Contested),
             },
             trust: TrustPolicy {
-                trusted_threshold: Some(0.80),
+                trusted_threshold: Some(DEFAULT_TRUSTED_THRESHOLD),
             },
             freshness: FreshnessIntervals {
-                slow: Some(Interval("90d".into())),
-                volatile: Some(Interval("1h".into())),
+                slow: Some(Interval(DEFAULT_SLOW_INTERVAL.into())),
+                volatile: Some(Interval(DEFAULT_VOLATILE_INTERVAL.into())),
             },
             subject_of: BTreeMap::new(),
         }
@@ -547,6 +570,29 @@ impl Policy {
             policy.layer_with_packs(&version.document, &version.packs);
         }
         policy
+    }
+
+    /// The score at or above which a verified claim is trusted.
+    pub fn trusted_threshold(&self) -> f64 {
+        self.trust
+            .trusted_threshold
+            .unwrap_or(DEFAULT_TRUSTED_THRESHOLD)
+    }
+
+    /// How long a claim on `predicate` stays fresh after it was last attested: the predicate's
+    /// `reverify_after`, or its freshness class's interval. None when it never goes stale.
+    pub fn reverify_interval(&self, predicate: &str) -> Option<Duration> {
+        let declared = self.predicate(predicate);
+        if let Some(interval) = &declared.reverify_after {
+            return Some(interval.duration());
+        }
+        let (interval, default) = match declared.freshness {
+            FreshnessClass::Stable => return None,
+            FreshnessClass::Slow => (&self.freshness.slow, DEFAULT_SLOW_INTERVAL),
+            FreshnessClass::Volatile => (&self.freshness.volatile, DEFAULT_VOLATILE_INTERVAL),
+        };
+        let interval = interval.clone().unwrap_or_else(|| Interval(default.into()));
+        Some(interval.duration())
     }
 
     /// How many aliases resolve to a subject.

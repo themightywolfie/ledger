@@ -13,7 +13,7 @@ steps:
       value: "2.15.0"
       text: "billing-api 2.15.0 is out, according to its release notes page"
       reported_source: web
-    expect: { status: proposed, trust: 0.15, hints: [] }
+    expect: { status: proposed, trust: { score: 0.15 }, hints: [] }
 
   - as: coder
     remember:
@@ -22,7 +22,7 @@ steps:
       value: "team:payments"
       text: "the runbook says billing-api is owned by the payments team"
       reported_source: document
-    expect: { status: proposed, trust: 0.30, hints: [] }
+    expect: { status: proposed, trust: { score: 0.30 }, hints: [] }
 
   - as: coder
     remember:
@@ -31,7 +31,7 @@ steps:
       value: applied
       text: "the deploy agent reports the billing-api migration is applied"
       reported_source: other_agent
-    expect: { status: proposed, trust: 0.25, hints: [] }
+    expect: { status: proposed, trust: { score: 0.25 }, hints: [] }
 
   # A document is no more trusted than another agent, so the declared kind stands.
   - as: adapter
@@ -42,7 +42,7 @@ steps:
       text: "the review agent reports billing-api's CI is failing"
       source: { kind: other_agent }
       reported_source: document
-    expect: { status: proposed, trust: 0.25, hints: [] }
+    expect: { status: proposed, trust: { score: 0.25 }, hints: [] }
 
   # A person passing on what a web page says is passing on the web.
   - as: operator
@@ -52,7 +52,7 @@ steps:
       value: "stripe"
       text: "a blog post says billing-api uses stripe"
       reported_source: web
-    expect: { status: proposed, trust: 0.15, hints: [] }
+    expect: { status: proposed, trust: { score: 0.15 }, hints: [] }
 
   - as: coder
     journal: { scope: "project:billing-api" }

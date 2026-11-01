@@ -97,7 +97,8 @@ Shapes are abbreviated. The JSON Schemas generated from the Rust types are autho
   "session": "s_981" }
 // output
 { "results": [ {
-    "claim_id": "clm_…", "status": "verified", "trusted": true, "trust": 0.95,
+    "claim_id": "clm_…", "status": "verified", "trusted": true,
+    "trust": { "score": 0.95, "components": { "prior": 0.30, "attestation": 0.95, … } },  // claims-and-integrity.md, section 5
     "relation": "temporal_update",   // new | duplicate | refinement | temporal_update | contradiction | compatible
     "resolution": { "rule": "system_of_record", "superseded": ["clm_…"] },
     "conflict_set": null,

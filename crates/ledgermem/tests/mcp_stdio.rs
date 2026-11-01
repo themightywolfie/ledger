@@ -70,7 +70,7 @@ async fn lists_remember_and_recall_and_recalls_a_remembered_claim_as_proposed() 
     let remembered = call(&client, "memory_remember", deployed_version_claim()).await;
     let result = &remembered["results"][0];
     assert_eq!(result["status"], "proposed");
-    assert_eq!(result["trust"], 0.30);
+    assert_eq!(result["trust"]["score"], 0.30);
     let claim_id = result["claim_id"].as_str().expect("claim id");
     assert!(claim_id.starts_with("clm_"), "{claim_id}");
 
@@ -84,7 +84,7 @@ async fn lists_remember_and_recall_and_recalls_a_remembered_claim_as_proposed() 
     let answer = &recalled["answer_set"][0];
     assert_eq!(answer["claim_id"], claim_id);
     assert_eq!(answer["status"], "proposed");
-    assert_eq!(answer["trust"], 0.30);
+    assert_eq!(answer["trust"]["score"], 0.30);
     assert_eq!(answer["scope"], "project:billing-api");
     let age = answer["age"].as_str().expect("age");
     assert!(is_age_in_seconds(age), "{age}");
@@ -109,6 +109,50 @@ async fn remember_offers_models_relayed_and_reported_sources_but_never_a_source_
     assert!(schema.contains("\"relayed_user_statement\""), "{schema}");
     assert!(schema.contains("\"reported_source\""), "{schema}");
     assert!(!schema.contains("\"source\""), "{schema}");
+}
+
+#[tokio::test]
+async fn a_high_stakes_recall_abstains_from_an_answer_nothing_backs() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = connect(
+        &dir.path().join("ledgermem.db"),
+        &["--project", "billing-api"],
+    )
+    .await;
+
+    let tools = client.list_all_tools().await.expect("tools/list");
+    let recall = tools
+        .iter()
+        .find(|tool| tool.name == "memory_recall")
+        .expect("memory_recall");
+    let schema = serde_json::to_string(&recall.input_schema).unwrap();
+    assert!(schema.contains("\"high_stakes\""), "{schema}");
+
+    call(&client, "memory_remember", deployed_version_claim()).await;
+    let query = "what version of billing-api is deployed?";
+    let recalled = call(&client, "memory_recall", json!({ "query": query })).await;
+    assert_eq!(recalled["guidance"]["code"], "unverified");
+    let answer = &recalled["answer_set"][0];
+    assert_eq!(answer["trusted"], false);
+    assert_eq!(answer["stale"], false);
+    assert_eq!(answer["injectable"], false);
+    assert_eq!(
+        answer["trust"],
+        json!({ "score": 0.30, "components": {
+            "prior": 0.30, "attestation": 0.0, "corroboration": 0.0, "contradiction": 0.0,
+            "stale_factor": 1.0
+        } })
+    );
+
+    let recalled = call(
+        &client,
+        "memory_recall",
+        json!({ "query": query, "high_stakes": true }),
+    )
+    .await;
+    client.cancel().await.expect("close client");
+    assert_eq!(recalled["guidance"]["code"], "unresolved");
+    assert_eq!(recalled["answer_set"].as_array().map(Vec::len), Some(1));
 }
 
 #[tokio::test]
@@ -189,11 +233,11 @@ async fn a_stdio_server_relays_the_users_words_unless_launched_with_no_relay_use
 
     let result = &remembered["results"][0];
     assert_eq!(result["status"], "verified");
-    assert_eq!(result["trust"], 0.80);
+    assert_eq!(result["trust"]["score"], 0.80);
     assert_eq!(result["hints"], json!([]));
     let result = &not_relayed["results"][0];
     assert_eq!(result["status"], "proposed");
-    assert_eq!(result["trust"], 0.30);
+    assert_eq!(result["trust"]["score"], 0.30);
     assert_eq!(
         result["hints"],
         json!([

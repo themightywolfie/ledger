@@ -10,6 +10,7 @@ use serde_json::Value;
 use time::OffsetDateTime;
 
 use crate::claim::{ClaimId, Scope, SourceKind, Status};
+use crate::trust::Trust;
 
 /// Propose claims for memory.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -105,7 +106,10 @@ pub struct RememberOutcome {
 pub struct ClaimResult {
     pub claim_id: ClaimId,
     pub status: Status,
-    pub trust: f64,
+    /// Verified, and scored at or above the trusted threshold.
+    pub trusted: bool,
+    /// The claim's trust as written, with its components.
+    pub trust: Trust,
     /// Advice on the claim as written: a declared predicate to use instead of an undeclared one,
     /// or why the write gate treated the claim as it did, such as why it was quarantined.
     pub hints: Vec<String>,
@@ -120,6 +124,21 @@ pub struct Recall {
     pub query: String,
     /// The most claims to return. Defaults to 10.
     pub limit: Option<usize>,
+    /// Whether you are about to act on the answer in a way that is costly to get wrong. Ledger
+    /// then abstains rather than offer an answer that is stale or unverified.
+    #[serde(default)]
+    pub high_stakes: bool,
+}
+
+impl Recall {
+    /// An ordinary read of `query`, returning up to the default number of claims.
+    pub fn new(query: impl Into<String>) -> Self {
+        Recall {
+            query: query.into(),
+            limit: None,
+            high_stakes: false,
+        }
+    }
 }
 
 /// The time a read is about.
@@ -133,7 +152,55 @@ pub enum ReadIntent {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ReadPack {
     pub intent: ReadIntent,
+    /// Every candidate, best match first, each labelled with how far it can be relied on.
     pub answer_set: Vec<RecalledClaim>,
+    pub guidance: Guidance,
+}
+
+/// How far a read's best answer, the first in its answer set, can be relied on
+/// (claims-and-integrity.md, section 9).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Guidance {
+    /// The verdict, for an adapter to act on.
+    pub code: GuidanceCode,
+    /// What the code means for whoever reads the answer.
+    pub text: String,
+}
+
+/// A read's verdict on its best answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuidanceCode {
+    /// The best answer is trusted and fresh.
+    Reliable,
+    /// The best answer isn't trusted: it is proposed, or verified but below the trusted threshold.
+    Unverified,
+    /// The best answer is verified but past its freshness interval.
+    Stale,
+    /// The best answer is contested, or the read is high-stakes and the best answer is stale or
+    /// unverified. Every candidate is returned, and none is picked.
+    Unresolved,
+    /// There is no answer.
+    #[serde(rename = "none")]
+    NoAnswer,
+}
+
+impl GuidanceCode {
+    fn as_str(self) -> &'static str {
+        match self {
+            GuidanceCode::Reliable => "reliable",
+            GuidanceCode::Unverified => "unverified",
+            GuidanceCode::Stale => "stale",
+            GuidanceCode::Unresolved => "unresolved",
+            GuidanceCode::NoAnswer => "none",
+        }
+    }
+}
+
+impl fmt::Display for GuidanceCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// One claim in an answer set.
@@ -146,9 +213,17 @@ pub struct RecalledClaim {
     pub value: Value,
     pub text: String,
     pub status: Status,
-    pub trust: f64,
+    /// Verified, and scored at or above the trusted threshold at the time of the read.
+    pub trusted: bool,
+    /// The claim's trust at the time of the read.
+    pub trust: Trust,
     /// How long ago Ledger learned the claim, such as `38m`.
     pub age: String,
+    /// Longer since it was last attested than its predicate's freshness allows.
+    pub stale: bool,
+    /// Trusted and fresh, so it may be placed in a model's instructions. Anything else is only
+    /// labelled data.
+    pub injectable: bool,
     #[serde(with = "time::serde::rfc3339")]
     pub recorded_at: OffsetDateTime,
 }

@@ -59,6 +59,8 @@ struct CallerSpec {
     user: String,
     project: Option<String>,
     agent: Option<String>,
+    /// The channel an operator works through: `cli`, the default, or `visualizer`.
+    channel: Option<Channel>,
     permissions: Option<Vec<Permission>>,
 }
 
@@ -171,7 +173,10 @@ pub async fn run(yaml: &str) -> Result<(), String> {
             .open_tenant(&spec.tenant)
             .await
             .map_err(|e| format!("caller {name}: {e}"))?;
-        callers.insert(name.clone(), build_caller(name, spec));
+        callers.insert(
+            name.clone(),
+            build_caller(name, spec).map_err(|e| format!("caller {name}: {e}"))?,
+        );
     }
     if let Some(document) = scenario.policy {
         let document = document_text(document)?;
@@ -200,7 +205,7 @@ pub async fn run(yaml: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn build_caller(name: &str, spec: &CallerSpec) -> Caller {
+fn build_caller(name: &str, spec: &CallerSpec) -> Result<Caller, String> {
     use Permission::{Admin, Attest, DeclareSource, Operator, Propose, Read};
     let (caller, default_permissions) = match spec.kind {
         CallerKind::Operator => {
@@ -208,8 +213,19 @@ fn build_caller(name: &str, spec: &CallerSpec) -> Caller {
                 .permissions
                 .clone()
                 .unwrap_or_else(|| vec![Read, Operator, Admin]);
-            return Caller::operator(&spec.tenant, name, Channel::Cli)
-                .with_permissions(permissions);
+            let channel = match spec.channel {
+                None | Some(Channel::Cli) => Channel::Cli,
+                Some(Channel::Visualizer) => Channel::Visualizer,
+                Some(_) => return Err("an operator works through cli or visualizer".into()),
+            };
+            return Ok(Caller::operator(&spec.tenant, name, channel).with_permissions(permissions));
+        }
+        _ if spec.channel.is_some() => {
+            return Err(
+                "only an operator picks its channel; an agent writes through agent, \
+                        and an integration through integration"
+                    .into(),
+            );
         }
         CallerKind::Agent => (
             Caller::agent(&spec.tenant, spec.agent.as_deref().unwrap_or(name)),
@@ -223,10 +239,10 @@ fn build_caller(name: &str, spec: &CallerSpec) -> Caller {
     let caller = caller
         .with_user(&spec.user)
         .with_permissions(spec.permissions.clone().unwrap_or(default_permissions));
-    match &spec.project {
+    Ok(match &spec.project {
         Some(project) => caller.with_project(project),
         None => caller,
-    }
+    })
 }
 
 async fn run_step(
