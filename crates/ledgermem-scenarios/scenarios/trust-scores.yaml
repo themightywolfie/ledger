@@ -1,0 +1,85 @@
+name: every trust score comes with its components, and only a verified claim at or above the threshold is trusted
+clock: 2026-11-01T09:00:00Z
+policy: { version: 1, extends: [software-delivery, personal-assistant] }
+callers:
+  person: { kind: operator, channel: visualizer, permissions: [read, propose, operator] }
+  assistant: { kind: agent, user: u_42, permissions: [read, propose, relay_user] }
+  coder: { kind: agent, project: billing-api }
+steps:
+  # The worked outcomes of claims-and-integrity.md, section 5, that need no verifier.
+  # The user tells the visualizer "I'm vegetarian".
+  - as: person
+    remember:
+      subject: "user:local"
+      predicate: dietary_preference
+      value: vegetarian
+      text: "the user is vegetarian"
+    expect:
+      status: verified
+      trusted: true
+      trust:
+        score: 0.90
+        components: { prior: 0.70, attestation: 0.90, corroboration: 0.0, contradiction: 0.0, stale_factor: 1.0 }
+
+  # An agent relays "user said: I'm vegetarian".
+  - as: assistant
+    remember:
+      subject: "user:u_42"
+      predicate: dietary_preference
+      value: vegetarian
+      text: "the user doesn't eat meat"
+      relayed_user_statement: { quote: "I'm vegetarian" }
+    expect:
+      status: verified
+      trusted: true
+      trust:
+        score: 0.80
+        components: { prior: 0.30, attestation: 0.80, corroboration: 0.0, contradiction: 0.0, stale_factor: 1.0 }
+
+  # An agent says "tests pass", with no evidence.
+  - as: coder
+    remember:
+      subject: "service:billing-api"
+      predicate: test_status
+      value: passing
+      text: "billing-api's tests pass"
+    expect:
+      status: proposed
+      trusted: false
+      trust:
+        score: 0.30
+        components: { prior: 0.30, attestation: 0.0, corroboration: 0.0, contradiction: 0.0, stale_factor: 1.0 }
+
+  # A read scores each claim again, with the same components.
+  - as: person
+    recall: { query: "vegetarian" }
+    expect:
+      answer_set:
+        - status: verified
+          trusted: true
+          trust:
+            score: 0.90
+            components: { prior: 0.70, attestation: 0.90, corroboration: 0.0, contradiction: 0.0, stale_factor: 1.0 }
+
+  - as: assistant
+    recall: { query: "meat" }
+    expect:
+      answer_set:
+        - { scope: "user:u_42", status: verified, trusted: true, trust: { score: 0.80 } }
+
+  - as: coder
+    recall: { query: "billing-api tests" }
+    expect:
+      answer_set:
+        - { status: proposed, trusted: false, trust: { score: 0.30, components: { attestation: 0.0 } } }
+
+  # A score below the trusted threshold is never trusted, however it was verified.
+  - as: person
+    apply_policy:
+      document: { version: 1, extends: [software-delivery, personal-assistant], trust: { trusted_threshold: 0.95 } }
+
+  - as: person
+    recall: { query: "vegetarian" }
+    expect:
+      answer_set:
+        - { status: verified, trusted: false, trust: { score: 0.90 } }

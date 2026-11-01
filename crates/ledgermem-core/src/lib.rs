@@ -13,6 +13,7 @@ mod ledger;
 mod ops;
 mod policy;
 mod store;
+mod trust;
 
 pub use caller::{Caller, Channel, Permission, ScopeBounds};
 pub use claim::{
@@ -23,9 +24,10 @@ pub use error::{Error, Result};
 pub use journal::{EntryKind, JournalEntry, NewEntry, StoredEntry, genesis_hash};
 pub use ledger::{LOCAL_TENANT, Ledger};
 pub use ops::{
-    ApplyPolicy, BrokenLink, ChainProblem, ChainReport, ClaimInput, ClaimResult, JournalQuery,
-    PolicyApplied, PolicyQuery, ReadIntent, ReadPack, Recall, RecalledClaim, ReindexReport,
-    RelayedUserStatement, Remember, RememberOutcome, ReportedSource, ScopeVerification,
+    ApplyPolicy, BrokenLink, ChainProblem, ChainReport, ClaimInput, ClaimResult, Guidance,
+    GuidanceCode, JournalQuery, PolicyApplied, PolicyQuery, ReadIntent, ReadPack, Recall,
+    RecalledClaim, ReindexReport, RelayedUserStatement, Remember, RememberOutcome, ReportedSource,
+    ScopeVerification,
 };
 pub use policy::{
     AgentClaims, AppliedVersion, Authority, Cardinality, FreshnessClass, FreshnessIntervals,
@@ -33,3 +35,4 @@ pub use policy::{
     ResolutionPolicy, Subjects, TrustPolicy, ValueType, VerifierName, VerifierRef,
 };
 pub use store::{Commit, JournalHead, Projection, Store, StoreError, StoredJournal};
+pub use trust::{Trust, TrustComponents};

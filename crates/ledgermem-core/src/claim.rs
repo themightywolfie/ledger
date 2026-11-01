@@ -33,13 +33,15 @@ pub struct Claim {
 }
 
 impl Claim {
-    /// How far the claim is trusted on its own: its source prior, or its strongest evidence if
-    /// that is stronger.
-    pub fn trust(&self) -> f64 {
+    /// When something last attested the claim, or when it was recorded if nothing has.
+    pub fn last_attested_at(&self) -> OffsetDateTime {
+        // Every kind of evidence so far attests the claim. Once a verifier can come back
+        // inconclusive (ticket #06), only passing evidence counts here.
         self.evidence
             .iter()
-            .map(|evidence| evidence.kind.strength())
-            .fold(self.source.kind.prior(), f64::max)
+            .map(|evidence| evidence.observed_at)
+            .max()
+            .unwrap_or(self.recorded_at)
     }
 }
 

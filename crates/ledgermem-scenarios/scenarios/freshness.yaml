@@ -1,0 +1,117 @@
+name: staleness is worked out at each read from the clock, and a stale claim scores lower and is never injectable
+clock: 2026-11-01T09:00:00Z
+policy:
+  version: 1
+  extends: [software-delivery, personal-assistant]
+  predicates:
+    on_call: { value_type: subject, freshness: volatile, reverify_after: 15m }
+    license: { freshness: stable, reverify_after: 30d }
+callers:
+  person: { kind: operator, permissions: [read, propose, operator] }
+  coder: { kind: agent, project: billing-api }
+steps:
+  # deployed_version is volatile (1 hour), on_call overrides that with 15 minutes, lives_in is slow
+  # (90 days), preferred_name is stable, license is stable but re-verified every 30 days, and
+  # runbook is undeclared, so slow.
+  - as: person
+    remember: { subject: "service:billing-api", predicate: deployed_version, value: "2.14.0", text: "billing-api is running 2.14.0 in production" }
+    expect: { status: verified, trusted: true, trust: { score: 0.90 } }
+  - as: person
+    remember: { subject: "team:payments", predicate: on_call, value: "user:priya", text: "priya is on call for payments" }
+  - as: person
+    remember: { subject: "user:local", predicate: lives_in, value: "Berlin", text: "the user lives in Berlin" }
+  - as: person
+    remember: { subject: "user:local", predicate: preferred_name, value: "Sam", text: "the user goes by Sam" }
+  - as: person
+    remember: { subject: "service:billing-api", predicate: runbook, value: "wiki/billing-api", text: "billing-api's runbook is in the wiki" }
+  - as: person
+    remember: { subject: "service:billing-api", predicate: license, value: "MIT", text: "billing-api is licensed under MIT" }
+  - as: coder
+    remember: { subject: "service:billing-api", predicate: deployed_version, value: "2.15.0", text: "billing-api has 2.15.0 rolled out" }
+
+  # A claim is fresh up to the end of its interval...
+  - advance: 15m
+  - as: person
+    recall: { query: "call" }
+    expect:
+      answer_set:
+        - { status: verified, stale: false, injectable: true, trusted: true, trust: { score: 0.90, components: { stale_factor: 1.0 } } }
+
+  # ...and stale once past it: scored at 0.80 of its trust, so no longer trusted, and never
+  # injectable, though it is still verified.
+  - advance: 45m
+  - as: person
+    recall: { query: "call" }
+    expect:
+      answer_set:
+        - status: verified
+          stale: true
+          injectable: false
+          trusted: false
+          trust:
+            score: 0.72
+            components: { prior: 0.70, attestation: 0.90, corroboration: 0.0, contradiction: 0.0, stale_factor: 0.80 }
+  - as: person
+    recall: { query: "running" }
+    expect:
+      answer_set:
+        - { stale: false, injectable: true }
+
+  - advance: 1s
+  - as: person
+    recall: { query: "running" }
+    expect:
+      answer_set:
+        - { status: verified, stale: true, injectable: false, trusted: false, trust: { score: 0.72 } }
+
+  # A claim nothing attests goes stale counting from when it was recorded. A proposed claim is
+  # never injectable, fresh or not.
+  - as: coder
+    recall: { query: "rolled" }
+    expect:
+      answer_set:
+        - { status: proposed, stale: true, injectable: false, trusted: false, trust: { score: 0.24, components: { stale_factor: 0.80 } } }
+  - as: person
+    recall: { query: "Berlin" }
+    expect:
+      answer_set:
+        - { stale: false, injectable: true }
+
+  # Slow claims, declared or not, go stale after 90 days. Stable ones never do, unless the
+  # predicate sets reverify_after.
+  - advance: 90d
+  - as: person
+    recall: { query: "Berlin" }
+    expect:
+      answer_set:
+        - { stale: true, injectable: false, trust: { score: 0.72 } }
+  - as: person
+    recall: { query: "wiki" }
+    expect:
+      answer_set:
+        - { stale: true, injectable: false }
+  - as: person
+    recall: { query: "Sam" }
+    expect:
+      answer_set:
+        - { status: verified, stale: false, injectable: true, trusted: true, trust: { score: 0.90 } }
+  - as: person
+    recall: { query: "licensed" }
+    expect:
+      answer_set:
+        - { stale: true, injectable: false }
+
+  # Staleness is never stored, so a longer interval in the policy makes a claim fresh again at once.
+  - as: person
+    apply_policy:
+      document:
+        version: 1
+        extends: [software-delivery, personal-assistant]
+        predicates:
+          on_call: { value_type: subject, freshness: volatile, reverify_after: 15m }
+        freshness: { slow: 365d }
+  - as: person
+    recall: { query: "Berlin" }
+    expect:
+      answer_set:
+        - { stale: false, injectable: true, trusted: true, trust: { score: 0.90 } }

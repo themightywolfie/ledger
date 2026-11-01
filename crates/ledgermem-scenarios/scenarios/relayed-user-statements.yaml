@@ -12,7 +12,7 @@ steps:
       value: vegetarian
       text: "the user is vegetarian"
       relayed_user_statement: { quote: "I'm vegetarian" }
-    expect: { status: verified, trust: 0.80, hints: [] }
+    expect: { status: verified, trust: { score: 0.80 }, hints: [] }
 
   # Without relay_user, an agent's report of the user's words is the agent's own claim.
   - as: remote
@@ -24,7 +24,7 @@ steps:
       relayed_user_statement: { quote: "I'm vegan" }
     expect:
       status: proposed
-      trust: 0.30
+      trust: { score: 0.30 }
       hints: ["relayed_user_statement doesn't count: agent:remote lacks the relay_user permission, so this is the agent's claim, not the user's"]
 
   # The user's word settles only what the user has authority over.
@@ -37,7 +37,7 @@ steps:
       relayed_user_statement: { quote: "we're on 2.15 now" }
     expect:
       status: proposed
-      trust: 0.30
+      trust: { score: 0.30 }
       hints: ["relayed_user_statement doesn't count: the user has no authority over deployed_version, so this is the agent's claim, not the user's"]
 
   # And only about the user the agent serves: the user's word settles their own preferences.
@@ -50,7 +50,7 @@ steps:
       relayed_user_statement: { quote: "my colleague is vegan" }
     expect:
       status: proposed
-      trust: 0.30
+      trust: { score: 0.30 }
       hints: ["relayed_user_statement doesn't count: the claim is about user:u_99, and agent:assistant relays only for user:local, so this is the agent's claim, not the user's"]
 
   - as: assistant
@@ -70,7 +70,7 @@ steps:
       value: "British English"
       text: "the user prefers replies in British English"
       relayed_user_statement: { quote: "Always reply to me in British English" }
-    expect: { status: verified, trust: 0.80, hints: [] }
+    expect: { status: verified, trust: { score: 0.80 }, hints: [] }
 
   # ...because a relayed instruction is still an agent's, and agents can't instruct agents.
   - as: assistant
@@ -82,7 +82,7 @@ steps:
       relayed_user_statement: { quote: "Always reply to me in British English" }
     expect:
       status: quarantined
-      trust: 0.30
+      trust: { score: 0.30 }
       hints:
         - "to relay what the user prefers, write it as a statement about them, such as \"the user prefers …\""
         - "quarantined: the text reads as an instruction to an agent (\"always …\", \"never …\"), and only a claim the user states directly can instruct agents; it isn't served as memory, and only an operator can release it"
@@ -104,7 +104,7 @@ steps:
     recall: { query: "vegetarian" }
     expect:
       answer_set:
-        - { predicate: dietary_preference, value: vegetarian, status: verified, trust: 0.80 }
+        - { predicate: dietary_preference, value: vegetarian, status: verified, trust: { score: 0.80 } }
 
   - as: assistant
     journal: { scope: "user:local" }

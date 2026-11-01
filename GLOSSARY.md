@@ -117,6 +117,9 @@ Backed by at least one passing attestation.
 **Trusted**:
 Verified, with a trust score at or above the trusted threshold, and not part of an open conflict set.
 
+**Injectable**:
+Verified, fresh and not contested, so an adapter may place the claim in a model's instructions. Anything else is passed only as labelled data.
+
 **Promotion**:
 A proposed claim becoming verified, because a verifier passed or a permitted actor attested it.
 
@@ -218,7 +221,7 @@ _Avoid_: query type, temporal mode
 The claims a read returns as its answer, each carrying status, trust and age.
 
 **Guidance**:
-A read's verdict on how far its answer set can be relied on, such as "verified and fresh" or "unresolved".
+A read's verdict on how far its best answer can be relied on: reliable, unverified, stale, unresolved or none.
 
 **Abstention**:
 A read declining to pick an answer, returning the competing candidates as unresolved instead.

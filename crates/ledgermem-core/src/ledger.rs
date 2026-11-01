@@ -7,18 +7,19 @@ use serde_json::Value;
 use time::Duration;
 
 use crate::caller::{Caller, Permission};
-use crate::claim::{Claim, ClaimId, Evidence, Scope, ScopeLevel, Source};
+use crate::claim::{Claim, ClaimId, Evidence, Scope, ScopeLevel, Source, Status};
 use crate::clock::Clock;
 use crate::error::{Error, Result};
 use crate::gate;
 use crate::journal::{self, EntryKind, JournalEntry, NewEntry, StoredEntry};
 use crate::ops::{
-    ApplyPolicy, BrokenLink, ChainReport, ClaimResult, JournalQuery, PolicyApplied, PolicyQuery,
-    ReadIntent, ReadPack, Recall, RecalledClaim, ReindexReport, Remember, RememberOutcome,
-    ScopeVerification,
+    ApplyPolicy, BrokenLink, ChainReport, ClaimResult, Guidance, GuidanceCode, JournalQuery,
+    PolicyApplied, PolicyQuery, ReadIntent, ReadPack, Recall, RecalledClaim, ReindexReport,
+    Remember, RememberOutcome, ScopeVerification,
 };
 use crate::policy::{Policy, PolicyVersion, invalid_policy};
 use crate::store::{Commit, JournalHead, Projection, Store};
+use crate::trust;
 
 /// The tenant a local install serves, created on first launch.
 pub const LOCAL_TENANT: &str = "local";
@@ -97,10 +98,12 @@ impl Ledger {
                 valid_to: None,
                 recorded_at: now,
             };
+            let standing = trust::standing(&claim, &policy, now);
             results.push(ClaimResult {
                 claim_id: claim.id.clone(),
                 status: claim.status,
-                trust: claim.trust(),
+                trusted: standing.trusted,
+                trust: standing.trust,
                 hints: admitted.hints.into_iter().chain(classified.hints).collect(),
             });
             let entry = NewEntry {
@@ -122,32 +125,41 @@ impl Ledger {
         Ok(RememberOutcome { results })
     }
 
-    /// Recalls the claims that hold now and match the query, best match first.
+    /// Recalls the claims that hold now and match the query, best match first, each scored at
+    /// the time of the read under the policy in effect for the caller.
     pub async fn recall(&self, caller: &Caller, req: Recall) -> Result<ReadPack> {
         caller.require(Permission::Read)?;
         let now = self.clock.now();
         let limit = req.limit.unwrap_or(DEFAULT_RECALL_LIMIT);
+        let policy = self.policy_in(&caller.tenant, caller.bounds.project.as_deref())?;
         let claims =
             self.store
                 .search(&caller.tenant, &caller.visible_scopes(), &req.query, limit)?;
 
         let answer_set = claims
             .into_iter()
-            .map(|claim| RecalledClaim {
-                trust: claim.trust(),
-                age: format_age(now - claim.recorded_at),
-                claim_id: claim.id,
-                scope: claim.scope,
-                subject: claim.subject,
-                predicate: claim.predicate,
-                value: claim.value,
-                text: claim.text,
-                status: claim.status,
-                recorded_at: claim.recorded_at,
+            .map(|claim| {
+                let standing = trust::standing(&claim, &policy, now);
+                RecalledClaim {
+                    trusted: standing.trusted,
+                    trust: standing.trust,
+                    age: format_age(now - claim.recorded_at),
+                    stale: standing.stale,
+                    injectable: standing.injectable,
+                    claim_id: claim.id,
+                    scope: claim.scope,
+                    subject: claim.subject,
+                    predicate: claim.predicate,
+                    value: claim.value,
+                    text: claim.text,
+                    status: claim.status,
+                    recorded_at: claim.recorded_at,
+                }
             })
-            .collect();
+            .collect::<Vec<_>>();
         Ok(ReadPack {
             intent: ReadIntent::Current,
+            guidance: guidance(&answer_set, req.high_stakes),
             answer_set,
         })
     }
@@ -357,6 +369,55 @@ fn projections_for(kind: EntryKind, content: &Value) -> Result<Vec<Projection>> 
             Ok(vec![Projection::PutPolicy(version)])
         }
     }
+}
+
+/// How far a read's best answer can be relied on (claims-and-integrity.md, section 9). The other
+/// candidates carry their own labels.
+fn guidance(answer_set: &[RecalledClaim], high_stakes: bool) -> Guidance {
+    let verdict = |code, text: &str| Guidance {
+        code,
+        text: text.to_owned(),
+    };
+    let Some(best) = answer_set.first() else {
+        return verdict(
+            GuidanceCode::NoAnswer,
+            "no memory: say you don't know rather than guess",
+        );
+    };
+    // Conflicts other than the best answer's own come with the conflict engine (ticket #09).
+    if best.status == Status::Contested {
+        return verdict(
+            GuidanceCode::Unresolved,
+            "unresolved: the best answer is contested; verify it through a tool or ask the user",
+        );
+    }
+    let (shortfall, text) = if best.status == Status::Verified && best.stale {
+        (
+            GuidanceCode::Stale,
+            "stale: it was last checked longer ago than its freshness allows, so check it before \
+             relying on it",
+        )
+    } else if !best.trusted {
+        (
+            GuidanceCode::Unverified,
+            "unverified: check it with your tools or ask the user before relying on it",
+        )
+    } else {
+        return verdict(
+            GuidanceCode::Reliable,
+            "verified and fresh: rely on it as known",
+        );
+    };
+    if high_stakes {
+        return verdict(
+            GuidanceCode::Unresolved,
+            &format!(
+                "unresolved: the best answer is {shortfall}, and a high-stakes read shouldn't \
+                 rest on it; verify it through a tool or ask the user"
+            ),
+        );
+    }
+    verdict(shortfall, text)
 }
 
 /// A compact age in its largest whole unit: `45s`, `38m`, `3h` or `12d`.

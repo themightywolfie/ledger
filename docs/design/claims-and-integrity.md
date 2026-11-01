@@ -171,7 +171,7 @@ ceiling       = 0.60 if the only passing attestation is llm_judge, else 1.00
 | Agent claim judged only by the LLM judge | 0.60 | verified | no |
 | The Kubernetes-verified claim, 3 hours later (volatile, stale) | 0.76 | verified, stale | no, and not injectable |
 
-Every score is returned with its components so the visualizer and `memory_recall` can explain it.
+Every score is returned with its components so the visualizer and `memory_recall` can explain it, as `"trust": { "score": 0.76, "components": { "prior", "attestation", "corroboration", "contradiction", "stale_factor" } }`. `attestation` is 0 when nothing attests the claim. Scores are rounded to four decimal places, which every product of the defaults fits in, so a score reads 0.76 rather than 0.7599999999999999.
 
 ## 6. Freshness
 
@@ -181,7 +181,7 @@ Every score is returned with its components so the visualizer and `memory_recall
 | slow | 90 days |
 | volatile | 1 hour |
 
-A predicate may override its interval (`reverify_after`). Undeclared predicates are `slow`. A claim is **stale** when `now − last_attested_at > interval`, or, for a claim that has never been attested, `now − recorded_at > interval`. Staleness is computed at read time from the clock port. Nothing sweeps on a timer in v1. `recall` enqueues re-verification for stale volatile claims it returns, and `check_before_act` re-verifies inline.
+A predicate's `reverify_after` replaces its class's interval, and gives even a `stable` predicate one. Undeclared predicates are `slow`. A claim is **stale** when `now − last_attested_at > interval`, or, for a claim that has never been attested, `now − recorded_at > interval`. A claim is still fresh at the very end of its interval. Staleness is computed at read time from the clock port. Nothing sweeps on a timer in v1. `recall` enqueues re-verification for stale volatile claims it returns, and `check_before_act` re-verifies inline.
 
 ## 7. Relation classification (write time)
 
@@ -246,24 +246,29 @@ The caller may pass `intent` (`current`, `as_of`, `history`, `change`) and `at` 
   "intent": "current",
   "answer_set": [
     { "claim_id": "clm_…", "text": "billing-api runs 2.14.0", "status": "verified", "trusted": true,
-      "trust": 0.95, "age": "38m", "stale": false, "injectable": true, "scope": "project:billing-api" }
+      "trust": { "score": 0.95, "components": { "prior": 0.30, "attestation": 0.95, "corroboration": 0.0, "contradiction": 0.0, "stale_factor": 1.0 } },
+      "age": "38m", "stale": false, "injectable": true, "scope": "project:billing-api" }
   ],
   "conflicts": [],
   "stale": [],
   "shadowed": [],
-  "guidance": { "code": "reliable", "text": "verified and fresh" }
+  "guidance": { "code": "reliable", "text": "verified and fresh: rely on it as known" }
 }
 ```
 
+Each claim is scored, and judged stale, trusted and injectable, under the policy in effect for the caller: the tenant policy with the caller's project overlay, the same policy `remember` checks claims against.
+
 ### Guidance
+
+Guidance is about the **best answer**, the first in the answer set. Every other candidate carries its own `trusted`, `stale` and `injectable`. The first row that applies, in this order, decides:
 
 | Code | When | Adapter behaviour |
 | --- | --- | --- |
-| `reliable` | Every answer is injectable and trusted, and there are no conflicts. | Inject as known. |
-| `unverified` | The best answer is proposed, or verified but below the trusted threshold. | Pass as labelled data: "unverified: check before relying". |
-| `stale` | The best answer is stale and the read isn't high-stakes. | Pass as labelled data, with the re-verification already queued. |
-| `unresolved` | The best answer is contested, or it is stale or unverified and the caller set `high_stakes: true`. Both candidates are returned (abstention). | Instruct the model to verify through a tool or ask the user. |
 | `none` | No answer. | Say there is no memory, rather than guessing. |
+| `unresolved` | The best answer is contested. Or it would be `stale` or `unverified` below, and the caller set `high_stakes: true`. Every candidate is returned, and none is picked (abstention). | Instruct the model to verify through a tool or ask the user. |
+| `stale` | The best answer is verified and stale. | Pass as labelled data, with the re-verification already queued. |
+| `unverified` | The best answer isn't trusted: it is proposed, or verified but below the trusted threshold. | Pass as labelled data: "unverified: check before relying". |
+| `reliable` | The best answer is trusted and fresh, and there are no conflicts. | Inject as known. |
 
 ## 10. Pre-action check
 

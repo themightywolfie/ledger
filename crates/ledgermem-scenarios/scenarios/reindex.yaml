@@ -23,7 +23,7 @@ steps:
           text: "billing-api is running 2.14.0 in production"
           scope: "project:billing-api"
           status: proposed
-          trust: 0.30
+          trust: { score: 0.30 }
           age: 38m
           recorded_at: "2026-10-26T09:00:00Z"
 

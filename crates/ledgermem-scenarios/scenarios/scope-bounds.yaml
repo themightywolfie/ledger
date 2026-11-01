@@ -32,4 +32,4 @@ steps:
     recall: { query: "timezone" }
     expect:
       answer_set:
-        - { subject: "user:local", scope: "user:local", status: proposed, trust: 0.30 }
+        - { subject: "user:local", scope: "user:local", status: proposed, trust: { score: 0.30 } }

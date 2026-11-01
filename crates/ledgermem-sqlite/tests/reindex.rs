@@ -71,10 +71,7 @@ async fn ledger_with_claims(path: &Path) -> Ledger {
 
 /// Everything a reader can see: a recall that matches all three claims, and both journals.
 async fn reads(ledger: &Ledger) -> Value {
-    let recall = Recall {
-        query: "who owns billing-api".into(),
-        limit: None,
-    };
+    let recall = Recall::new("who owns billing-api");
     let mut reads =
         vec![serde_json::to_value(ledger.recall(&coder(), recall).await.unwrap()).unwrap()];
     for scope in [
@@ -300,10 +297,7 @@ async fn a_claim_written_while_reindex_runs_survives_the_rebuild() {
         report.entries, 2,
         "the rebuild includes the late entry: {report:?}"
     );
-    let recall = Recall {
-        query: "billing-api running".into(),
-        limit: None,
-    };
+    let recall = Recall::new("billing-api running");
     let recalled = ledger.recall(&coder(), recall).await.unwrap();
     let values: Vec<_> = recalled
         .answer_set
