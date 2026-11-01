@@ -43,7 +43,7 @@ ledgermem serve         # REST + MCP over HTTP + the memory visualizer on http:/
 ## Repository layout (planned)
 
 ```
-crates/ledgermem-core        engine, domain types, ports (no database, HTTP or model dependencies)
+crates/ledgermem-core        engine, domain types, ports and the predicate packs (no database, HTTP or model dependencies)
 crates/ledgermem-sqlite      SQLite store adapter
 crates/ledgermem-verifiers   built-in verifiers and the exec protocol
 crates/ledgermem-models      embedders and optional language-model providers
@@ -51,7 +51,6 @@ crates/ledgermem-server      REST, MCP and the embedded visualizer
 crates/ledgermem             the binary and CLI
 crates/ledgermem-scenarios   integrity scenario suite (not published)
 web/                         the memory visualizer (React + TypeScript)
-policies/                    predicate packs
 ```
 
 ## How this project is planned

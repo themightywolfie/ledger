@@ -1,0 +1,38 @@
+# Predicate pack: personal assistant. A policy starts from it with `extends: [personal-assistant]`,
+# and any predicate the policy declares itself replaces the pack's declaration of it.
+#
+# Every predicate here is the user's to state: only the user, or an agent relaying the user's own
+# words, can settle it.
+version: 1
+predicates:
+  lives_in:
+    cardinality: single
+    value_type: text
+    freshness: slow
+    authority: user
+  works_at:
+    cardinality: single
+    value_type: text
+    freshness: slow
+    authority: user
+  dietary_preference:
+    cardinality: multi
+    value_type: text
+    freshness: slow
+    authority: user
+  timezone:
+    cardinality: single
+    value_type: text
+    freshness: slow
+    authority: user
+  preferred_name:
+    cardinality: single
+    value_type: text
+    freshness: stable
+    authority: user
+  prefers:
+    cardinality: multi
+    value_type: text
+    freshness: slow
+    authority: user
+    instruction: true

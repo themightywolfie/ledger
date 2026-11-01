@@ -7,6 +7,7 @@
 //! ```yaml
 //! name: an agent's claim is recalled as proposed
 //! clock: 2026-10-25T09:00:00Z
+//! policy: { version: 1, extends: [software-delivery] }
 //! callers:
 //!   coder: { kind: agent, project: billing-api }
 //! steps:
@@ -19,6 +20,8 @@
 //!     expect: { answer_set: [ { status: proposed, age: 38m } ] }
 //! ```
 //!
+//! The optional `policy` is applied to every tenant the callers use before the first step.
+//!
 //! An `expect` is matched as a subset of the step's JSON outcome: objects need only the keys the
 //! scenario lists, arrays must have the same length, and numbers match within 1e-9.
 
@@ -26,7 +29,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ledgermem_core::{
-    Caller, Channel, ClaimInput, JournalQuery, Ledger, Permission, Recall, Remember, TestClock,
+    ApplyPolicy, Caller, Channel, ClaimInput, JournalQuery, Ledger, Permission, PolicyQuery,
+    Recall, Remember, TestClock,
 };
 use ledgermem_sqlite::SqliteStore;
 use serde::Deserialize;
@@ -39,6 +43,8 @@ struct Scenario {
     name: String,
     #[serde(with = "time::serde::rfc3339")]
     clock: OffsetDateTime,
+    /// A policy document applied to each tenant before the first step.
+    policy: Option<serde_yaml::Value>,
     callers: BTreeMap<String, CallerSpec>,
     steps: Vec<Step>,
 }
@@ -77,7 +83,35 @@ struct Step {
     verify: Option<Value>,
     /// Rebuild the caller's tenant's projections from its journals: `reindex: {}`.
     reindex: Option<Value>,
+    apply_policy: Option<PolicyStep>,
+    show_policy: Option<PolicyQuery>,
     expect: Option<Value>,
+}
+
+/// A policy document to apply, written in the scenario as YAML, and the project it overlays.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PolicyStep {
+    project: Option<String>,
+    /// A YAML mapping, or a string holding the document's text verbatim.
+    document: serde_yaml::Value,
+}
+
+impl PolicyStep {
+    fn into_request(self) -> Result<ApplyPolicy, String> {
+        Ok(ApplyPolicy {
+            document: document_text(self.document)?,
+            project: self.project,
+        })
+    }
+}
+
+/// The text of a policy document written in a scenario.
+fn document_text(document: serde_yaml::Value) -> Result<String, String> {
+    match document {
+        serde_yaml::Value::String(text) => Ok(text),
+        document => serde_yaml::to_string(&document).map_err(|e| e.to_string()),
+    }
 }
 
 /// The one engine operation a step plays.
@@ -87,6 +121,8 @@ enum Action {
     Journal(JournalQuery),
     Verify,
     Reindex,
+    ApplyPolicy(ApplyPolicy),
+    ShowPolicy(PolicyQuery),
 }
 
 impl Step {
@@ -97,13 +133,17 @@ impl Step {
             self.journal.take().map(Action::Journal),
             self.verify.take().map(|_| Action::Verify),
             self.reindex.take().map(|_| Action::Reindex),
+            match self.apply_policy.take() {
+                Some(step) => Some(Action::ApplyPolicy(step.into_request()?)),
+                None => None,
+            },
+            self.show_policy.take().map(Action::ShowPolicy),
         ];
         let mut present = actions.into_iter().flatten();
         match (present.next(), present.next()) {
             (Some(action), None) => Ok(action),
-            _ => Err(
-                "a step needs exactly one of remember, recall, journal, verify or reindex".into(),
-            ),
+            _ => Err("a step needs exactly one of remember, recall, journal, verify, reindex,                       apply_policy or show_policy"
+                .into()),
         }
     }
 }
@@ -127,6 +167,23 @@ pub async fn run(yaml: &str) -> Result<(), String> {
             .await
             .map_err(|e| format!("caller {name}: {e}"))?;
         callers.insert(name.clone(), build_caller(name, spec));
+    }
+    if let Some(document) = scenario.policy {
+        let document = document_text(document)?;
+        let tenants: std::collections::BTreeSet<_> =
+            scenario.callers.values().map(|spec| &spec.tenant).collect();
+        for tenant in tenants {
+            let operator = Caller::operator(tenant, "scenario", Channel::Cli)
+                .with_permissions([Permission::Operator]);
+            let apply = ApplyPolicy {
+                document: document.clone(),
+                project: None,
+            };
+            ledger
+                .apply_policy(&operator, apply)
+                .await
+                .map_err(|e| format!("policy: {e}"))?;
+        }
     }
 
     for (index, step) in scenario.steps.into_iter().enumerate() {
@@ -195,6 +252,8 @@ async fn run_step(
         Action::Journal(query) => to_json(ledger.journal(caller, query).await),
         Action::Verify => to_json(ledger.verify_journals(caller).await),
         Action::Reindex => to_json(ledger.reindex(caller).await),
+        Action::ApplyPolicy(apply) => to_json(ledger.apply_policy(caller, apply).await),
+        Action::ShowPolicy(query) => to_json(ledger.policy(caller, query).await),
     };
 
     let expected = step.expect.unwrap_or(Value::Null);

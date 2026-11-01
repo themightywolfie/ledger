@@ -1,0 +1,46 @@
+# Predicate pack: software delivery. A policy starts from it with `extends: [software-delivery]`,
+# and any predicate the policy declares itself replaces the pack's declaration of it.
+version: 1
+predicates:
+  deployed_version:
+    cardinality: single
+    value_type: version
+    freshness: volatile
+  test_status:
+    cardinality: single
+    value_type: { enum: [passing, failing] }
+    freshness: volatile
+    verifier: { use: test_run }
+    agent_claims: require_evidence
+  pr_state:
+    cardinality: single
+    value_type: { enum: [draft, open, merged, closed] }
+    freshness: volatile
+    verifier: { use: github, params: { check: pr_state } }
+  ci_status:
+    cardinality: single
+    value_type: { enum: [pending, passing, failing] }
+    freshness: volatile
+    verifier: { use: github, params: { check: ci_status } }
+    agent_claims: require_evidence
+  branch_exists:
+    cardinality: single
+    value_type: boolean
+    freshness: volatile
+    verifier: { use: git, params: { check: branch_exists } }
+  migration_status:
+    cardinality: single
+    value_type: { enum: [pending, applied, rolled_back] }
+    freshness: volatile
+  owner:
+    cardinality: single
+    value_type: subject
+    freshness: slow
+  uses_dependency:
+    cardinality: multi
+    value_type: text
+    freshness: slow
+  decision:
+    cardinality: multi
+    value_type: text
+    freshness: stable

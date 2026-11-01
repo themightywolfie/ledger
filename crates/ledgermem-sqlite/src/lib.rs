@@ -1,15 +1,15 @@
 //! The SQLite store adapter: journals, their projections and the FTS5 recall index in one file.
 //!
-//! The `entries` table is the source of truth. `claims` and `claims_fts` are projections, written
-//! in the same transaction as the entries they come from (ADR-0010).
+//! The `entries` table is the source of truth. `claims`, `claims_fts` and `policies` are
+//! projections, written in the same transaction as the entries they come from (ADR-0010).
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use ledgermem_core::{
-    Claim, Commit, JournalHead, Projection, Scope, Store, StoreError, StoredEntry, StoredJournal,
-    genesis_hash,
+    Claim, Commit, JournalHead, PolicyVersion, Projection, Scope, Store, StoreError, StoredEntry,
+    StoredJournal, genesis_hash,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::Value;
@@ -17,8 +17,9 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 /// The schema version this build creates and opens, kept in SQLite's `user_version`.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 1 + MIGRATIONS.len() as i64;
 
+/// The schema as version 1 created it. [`MIGRATIONS`] bring it up to date.
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS tenants (
         id          TEXT PRIMARY KEY,
@@ -55,6 +56,18 @@ const SCHEMA: &str = "
 
     CREATE VIRTUAL TABLE IF NOT EXISTS claims_fts USING fts5 (text, subject);
 ";
+
+/// Each migration takes the schema up one version: the first from version 1 to 2.
+const MIGRATIONS: [&str; 1] = [
+    // A projection, so it starts empty: no journal before version 2 holds a policy version.
+    "CREATE TABLE policies (
+        tenant   TEXT NOT NULL REFERENCES tenants (id),
+        scope    TEXT NOT NULL,
+        version  TEXT NOT NULL,
+        body     TEXT NOT NULL,
+        PRIMARY KEY (tenant, scope)
+    ) STRICT;",
+];
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -95,8 +108,14 @@ impl SqliteStore {
                          a new one",
                     ));
                 }
-                0 => {
-                    tx.execute_batch(SCHEMA).map_err(StoreError::new)?;
+                version @ 0..SCHEMA_VERSION => {
+                    if version == 0 {
+                        tx.execute_batch(SCHEMA).map_err(StoreError::new)?;
+                    }
+                    let applied = usize::try_from(version.max(1) - 1).map_err(StoreError::new)?;
+                    for migration in &MIGRATIONS[applied..] {
+                        tx.execute_batch(migration).map_err(StoreError::new)?;
+                    }
                     tx.pragma_update(None, "user_version", SCHEMA_VERSION)
                         .map_err(StoreError::new)?;
                 }
@@ -224,6 +243,19 @@ impl Store for SqliteStore {
             .collect()
     }
 
+    fn policy(&self, tenant: &str, scope: &Scope) -> Result<Option<PolicyVersion>, StoreError> {
+        let body: Option<String> = self
+            .conn()?
+            .query_row(
+                "SELECT body FROM policies WHERE tenant = ?1 AND scope = ?2",
+                params![tenant, scope.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StoreError::new)?;
+        body.map(|body| from_json(&body)).transpose()
+    }
+
     fn journal(&self, tenant: &str, scope: &str) -> Result<Vec<StoredEntry>, StoreError> {
         let conn = self.conn()?;
         let mut statement = conn
@@ -282,6 +314,8 @@ impl Store for SqliteStore {
         )
         .map_err(StoreError::new)?;
         tx.execute("DELETE FROM claims WHERE tenant = ?1", [tenant])
+            .map_err(StoreError::new)?;
+        tx.execute("DELETE FROM policies WHERE tenant = ?1", [tenant])
             .map_err(StoreError::new)?;
         for projection in projections {
             apply_projection(&tx, tenant, projection)?;
@@ -373,7 +407,28 @@ fn apply_projection(
 ) -> Result<(), StoreError> {
     match projection {
         Projection::PutClaim(claim) => put_claim(tx, tenant, &claim),
+        Projection::PutPolicy(version) => put_policy(tx, tenant, &version),
     }
+}
+
+/// Makes `version` the policy in effect in its scope.
+fn put_policy(
+    tx: &Transaction<'_>,
+    tenant: &str,
+    version: &PolicyVersion,
+) -> Result<(), StoreError> {
+    tx.execute(
+        "INSERT INTO policies (tenant, scope, version, body) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (tenant, scope) DO UPDATE SET version = excluded.version, body = excluded.body",
+        params![
+            tenant,
+            version.scope.to_string(),
+            version.id,
+            to_json(version)?.to_string(),
+        ],
+    )
+    .map(drop)
+    .map_err(StoreError::new)
 }
 
 /// Writes a claim's current state and refreshes its full-text row.

@@ -10,6 +10,7 @@ mod error;
 mod journal;
 mod ledger;
 mod ops;
+mod policy;
 mod store;
 
 pub use caller::{Caller, Channel, Permission, ScopeBounds};
@@ -19,7 +20,13 @@ pub use error::{Error, Result};
 pub use journal::{EntryKind, JournalEntry, NewEntry, StoredEntry, genesis_hash};
 pub use ledger::{LOCAL_TENANT, Ledger};
 pub use ops::{
-    BrokenLink, ChainProblem, ChainReport, ClaimInput, ClaimResult, JournalQuery, ReadIntent,
-    ReadPack, Recall, RecalledClaim, ReindexReport, Remember, RememberOutcome, ScopeVerification,
+    ApplyPolicy, BrokenLink, ChainProblem, ChainReport, ClaimInput, ClaimResult, JournalQuery,
+    PolicyApplied, PolicyQuery, ReadIntent, ReadPack, Recall, RecalledClaim, ReindexReport,
+    Remember, RememberOutcome, ScopeVerification,
+};
+pub use policy::{
+    AgentClaims, AppliedVersion, Authority, Cardinality, FreshnessClass, FreshnessSettings,
+    Interval, OnUnresolved, Policy, PolicyDocument, PolicyVersion, Predicate, PredicatePack,
+    ResolutionSettings, Subjects, TrustSettings, ValueType, VerifierName, VerifierRef,
 };
 pub use store::{Commit, JournalHead, Projection, Store, StoreError, StoredJournal};

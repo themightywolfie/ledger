@@ -1,0 +1,101 @@
+name: remember resolves subjects through declared aliases, checks values against declared types, and hints at declared predicates
+clock: 2026-11-01T09:00:00Z
+policy:
+  version: 1
+  extends: [software-delivery]
+  subjects:
+    aliases:
+      "service:billing-api": ["service:billing", "repo:acme/billing-api"]
+      "team:payments": ["team:pay"]
+  predicates:
+    released_at: { value_type: datetime }
+    replicas: { value_type: number, freshness: volatile }
+callers:
+  coder: { kind: agent, project: billing-api }
+steps:
+  - as: coder
+    remember:
+      subject: " Service:Billing "
+      predicate: deployed_version
+      value: "v2.15"
+      text: "billing is running v2.15 in production"
+    expect: { status: proposed, hints: [] }
+
+  - as: coder
+    remember:
+      subject: "service:billing-api"
+      predicate: owner
+      value: "Team:Pay"
+      text: "billing-api is owned by the payments team"
+    expect: { status: proposed, hints: [] }
+
+  - as: coder
+    recall: { query: "running" }
+    expect:
+      answer_set:
+        - { subject: "service:billing-api", predicate: deployed_version, value: "v2.15" }
+
+  - as: coder
+    remember:
+      subject: "repo:acme/billing-api"
+      predicate: test_status
+      value: flaky
+      text: "the billing-api tests are flaky"
+    expect: { error: { code: invalid_claim, message: "claims[0].value: test_status takes one of passing or failing, not \"flaky\"; nothing was remembered" } }
+
+  - as: coder
+    remember:
+      subject: "service:billing-api"
+      predicate: replicas
+      value: "three"
+      text: "billing-api runs three replicas"
+    expect: { error: { code: invalid_claim, message: "claims[0].value: replicas takes a number, not \"three\"; nothing was remembered" } }
+
+  - as: coder
+    remember:
+      subject: "service:billing-api"
+      predicate: released_at
+      value: "last tuesday"
+      text: "billing-api 2.15 was released last tuesday"
+    expect: { error: { code: invalid_claim, message: "claims[0].value: released_at takes an RFC 3339 date and time such as 2026-11-01T09:00:00Z, not \"last tuesday\"; nothing was remembered" } }
+
+  - as: coder
+    remember:
+      subject: "billing"
+      predicate: deployed_version
+      value: "2.15.0"
+      text: "billing is running 2.15.0"
+    expect: { error: { code: invalid_claim, message: "claims[0].subject: \"billing\" is not a subject like service:billing-api; nothing was remembered" } }
+
+  - as: coder
+    remember:
+      subject: "service:billing-api"
+      predicate: deploy_version
+      value: "2.15.0"
+      text: "billing-api is running 2.15.0"
+    expect: { status: proposed, hints: ["undeclared predicate 'deploy_version'; did you mean 'deployed_version'?"] }
+
+  - as: coder
+    remember:
+      subject: "repo:acme/billing-api"
+      predicate: tests_passing
+      value: true
+      text: "the billing-api tests pass"
+    expect: { status: proposed, hints: ["undeclared predicate 'tests_passing'; did you mean 'test_status'?"] }
+
+  - as: coder
+    remember:
+      subject: "service:billing-api"
+      predicate: on_call_rota
+      value: "weekly"
+      text: "billing-api's on-call rota is weekly"
+    expect: { status: proposed, hints: ["undeclared predicate 'on_call_rota'; it is treated as single-valued and slow until the policy declares it"] }
+
+  - as: coder
+    journal: { scope: "project:billing-api" }
+    expect:
+      - content: { subject: "service:billing-api", predicate: deployed_version }
+      - content: { subject: "service:billing-api", predicate: owner, value: "team:payments" }
+      - content: { predicate: deploy_version }
+      - content: { subject: "service:billing-api", predicate: tests_passing }
+      - content: { predicate: on_call_rota }

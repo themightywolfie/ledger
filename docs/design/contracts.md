@@ -216,6 +216,7 @@ Keys also carry scope bounds (for example `project:billing-api`, `user:u_42`), a
 | ScopeDenied, PermissionDenied | 403 | tool error |
 | NotFound | 404 | tool error |
 | InvalidClaim | 422 (with `fields`) | tool error |
+| InvalidPolicy | 422 | not reachable (agents can't apply a policy) |
 | ChainBroken, RestoreTargetNotEmpty | 409 | tool error |
 | VerifierUnavailable | 424 | tool error |
 | Busy | 503 with `Retry-After` | tool error |
@@ -299,7 +300,7 @@ YAML, applied with `ledgermem policy apply` or `POST /v1/policy`. Holds no secre
 
 ```yaml
 version: 1
-extends: [software-delivery, personal-assistant]   # predicate packs shipped in policies/
+extends: [software-delivery, personal-assistant]   # predicate packs built into ledgermem; `ledgermem policy packs` lists them
 
 subjects:
   aliases:
@@ -339,7 +340,15 @@ freshness:
   volatile: 1h
 ```
 
-Validation errors name the offending path (`predicates.test_status.value_type`) and reject the whole document. Nothing is partially applied.
+Validation errors name the offending path (`predicates.test_status.value_type`) and reject the whole document. Nothing is partially applied. Besides the shapes above, validation checks that predicate names are `lower_snake_case`, that every subject and alias is written `kind:name`, that an alias names exactly one subject and is not itself a subject with aliases, that enum members are distinct, that intervals are written like `45s`, `30m`, `1h` or `90d`, that a verifier is one of those below, and that `trust_margin` and `trusted_threshold` lie between 0 and 1.
+
+**Layering.** A document starts from the packs it extends, in order, and its own declarations replace theirs. A project overlay is layered the same way over the tenant policy:
+
+- A predicate declared again replaces the earlier declaration whole, so an overlay that changes one field restates the others it wants kept.
+- An alias declared again moves to the subject the later layer names. An overlay may make a tenant subject an alias, and the tenant's aliases of that subject follow it.
+- `resolution`, `trust` and `freshness` settings replace the earlier layer's one field at a time. A setting no layer sets takes its default.
+
+Applying a version journals it, with the packs it extends as they were at that moment, in the org journal for the tenant policy or in the project's journal for an overlay. The new version replaces the previous one in that scope. `ledgermem policy show` prints the policy in effect, with every default filled in, and `--project` adds that project's overlay. Agents read the same thing, and only operators can apply a version, so no agent can declare an alias.
 
 **Built-in verifier parameters:**
 

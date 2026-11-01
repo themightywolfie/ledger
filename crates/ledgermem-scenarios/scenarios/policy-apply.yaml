@@ -1,0 +1,53 @@
+name: an operator applies a policy that extends a pack, it is journaled, and agents read what it declares
+clock: 2026-11-01T09:00:00Z
+callers:
+  operator: { kind: operator }
+  coder: { kind: agent, project: billing-api }
+steps:
+  - as: coder
+    show_policy: {}
+    expect: { versions: [], packs: [], predicates: {} }
+
+  - as: operator
+    apply_policy:
+      document:
+        version: 1
+        extends: [software-delivery]
+        predicates:
+          feature_flag:
+            value_type: boolean
+            freshness: volatile
+    expect: { scope: org, predicates: 10, aliases: 0 }
+
+  - as: coder
+    show_policy: {}
+    expect:
+      versions: [ { scope: org } ]
+      packs: [software-delivery]
+      predicates:
+        deployed_version: { cardinality: single, value_type: version, freshness: volatile }
+        test_status:
+          cardinality: single
+          value_type: { enum: [passing, failing] }
+          freshness: volatile
+          verifier: { use: test_run }
+          agent_claims: require_evidence
+        feature_flag: { cardinality: single, value_type: boolean, freshness: volatile }
+      resolution: { trust_margin: 0.25, on_unresolved: contested }
+      trust: { trusted_threshold: 0.80 }
+      freshness: { slow: 90d, volatile: 1h }
+
+  - as: operator
+    journal: { scope: org }
+    expect:
+      - seq: 1
+        kind: policy_applied
+        actor: "operator:operator"
+        content:
+          scope: org
+          document: { version: 1, extends: [software-delivery] }
+
+  - as: coder
+    apply_policy:
+      document: { version: 1, subjects: { aliases: { "service:billing-api": ["service:billing"] } } }
+    expect: { error: { code: permission_denied } }

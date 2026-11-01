@@ -13,6 +13,12 @@ pub enum Error {
     PermissionDenied(String),
     #[error("{0}")]
     NotFound(String),
+    /// A claim breaks its predicate's declared rules, such as a value outside a declared enum.
+    #[error("{0}")]
+    InvalidClaim(String),
+    /// A policy document doesn't parse or validate. Nothing in it was applied.
+    #[error("{0}")]
+    InvalidPolicy(String),
     /// A journal doesn't verify, so nothing may be rebuilt or restored from it.
     #[error("{0}")]
     ChainBroken(String),
@@ -30,6 +36,8 @@ impl Error {
             Error::ScopeDenied(_) => "scope_denied",
             Error::PermissionDenied(_) => "permission_denied",
             Error::NotFound(_) => "not_found",
+            Error::InvalidClaim(_) => "invalid_claim",
+            Error::InvalidPolicy(_) => "invalid_policy",
             Error::ChainBroken(_) => "chain_broken",
             Error::Busy(_) => "busy",
             Error::Internal(_) => "internal",

@@ -1,13 +1,14 @@
 //! The `ledgermem` binary: the CLI, and the wiring of adapters into the engine.
 
 use std::error::Error;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::{Args, Parser, Subcommand};
 use ledgermem_core::{
-    Caller, ChainReport, Channel, LOCAL_TENANT, Ledger, Permission, ReindexReport, SystemClock,
+    ApplyPolicy, Caller, ChainReport, Channel, LOCAL_TENANT, Ledger, Permission, PolicyApplied,
+    PolicyQuery, PredicatePack, ReindexReport, SystemClock,
 };
 use ledgermem_server::mcp::{StdioLaunch, serve_stdio};
 use ledgermem_sqlite::SqliteStore;
@@ -35,6 +36,37 @@ enum Command {
     Verify(OperatorArgs),
     /// Rebuild the tenant's claims and recall index from its journals.
     Reindex(OperatorArgs),
+    /// Apply or show the tenant's policy, or list the predicate packs a policy can extend.
+    #[command(subcommand)]
+    Policy(PolicyCommand),
+}
+
+#[derive(Subcommand)]
+enum PolicyCommand {
+    /// Apply a policy file to the tenant, or to one project as an overlay on the tenant's policy.
+    Apply {
+        /// The policy document, written in YAML.
+        file: PathBuf,
+        /// The project to overlay.
+        #[arg(long)]
+        project: Option<String>,
+        #[command(flatten)]
+        operator: OperatorArgs,
+    },
+    /// Show the policy in effect for the tenant, or for one project with its overlay.
+    Show {
+        /// The project whose overlay to include.
+        #[arg(long)]
+        project: Option<String>,
+        #[command(flatten)]
+        operator: OperatorArgs,
+    },
+    /// List the predicate packs a policy can extend.
+    Packs {
+        /// Print the packs as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Commands an operator runs on the database they open.
@@ -79,6 +111,15 @@ async fn main() -> ExitCode {
         Command::Mcp(args) => mcp(args).await.map(|()| ExitCode::SUCCESS),
         Command::Verify(args) => verify(args).await,
         Command::Reindex(args) => reindex(args).await,
+        Command::Policy(PolicyCommand::Apply {
+            file,
+            project,
+            operator,
+        }) => apply_policy(&file, project, operator).await,
+        Command::Policy(PolicyCommand::Show { project, operator }) => {
+            show_policy(project, operator).await
+        }
+        Command::Policy(PolicyCommand::Packs { json }) => list_packs(json),
     };
     match result {
         Ok(code) => code,
@@ -128,6 +169,50 @@ async fn reindex(args: OperatorArgs) -> Result<ExitCode, BoxError> {
     Ok(ExitCode::SUCCESS)
 }
 
+async fn apply_policy(
+    file: &Path,
+    project: Option<String>,
+    args: OperatorArgs,
+) -> Result<ExitCode, BoxError> {
+    let document = std::fs::read_to_string(file)
+        .map_err(|error| format!("can't read {}: {error}", file.display()))?;
+    let (ledger, operator) = open_as_operator(&args).await?;
+    let applied = ledger
+        .apply_policy(&operator, ApplyPolicy { document, project })
+        .await?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&applied)?);
+    } else {
+        print_policy_applied(&applied);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn show_policy(project: Option<String>, args: OperatorArgs) -> Result<ExitCode, BoxError> {
+    let (ledger, operator) = open_as_operator(&args).await?;
+    let policy = ledger.policy(&operator, PolicyQuery { project }).await?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&policy)?);
+    } else {
+        print!("{}", serde_yaml::to_string(&policy)?);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn list_packs(json: bool) -> Result<ExitCode, BoxError> {
+    let packs = PredicatePack::all();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&packs)?);
+        return Ok(ExitCode::SUCCESS);
+    }
+    let width = packs.iter().map(|pack| pack.name.len()).max().unwrap_or(0);
+    for pack in &packs {
+        let predicates: Vec<_> = pack.predicates.keys().map(String::as_str).collect();
+        println!("{:width$}  {}", pack.name, predicates.join(", "));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 /// The ledger behind `args`, and the local operator who runs commands on it.
 async fn open_as_operator(args: &OperatorArgs) -> Result<(Ledger, Caller), BoxError> {
     let ledger = open_ledger(args.db.clone())?;
@@ -168,6 +253,16 @@ fn print_reindex_report(tenant: &str, report: &ReindexReport) {
         plural(report.scopes, "journal", "journals"),
         plural(report.entries, "entry", "entries"),
         plural(report.claims, "claim", "claims"),
+    );
+}
+
+fn print_policy_applied(applied: &PolicyApplied) {
+    println!(
+        "Applied policy {} to {}: {}, {}.",
+        applied.policy_version,
+        applied.scope,
+        plural(applied.predicates, "predicate", "predicates"),
+        plural(applied.aliases, "alias", "aliases"),
     );
 }
 

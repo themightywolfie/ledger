@@ -1,0 +1,44 @@
+name: a project overlay can make a tenant subject an alias, and the tenant's aliases of it follow, in that project only
+clock: 2026-11-01T09:00:00Z
+policy:
+  version: 1
+  subjects:
+    aliases:
+      "service:billing-api": ["service:billing"]
+callers:
+  operator: { kind: operator }
+  migrating: { kind: agent, project: billing-v2 }
+  payments: { kind: agent, project: payments }
+steps:
+  - as: operator
+    apply_policy:
+      project: billing-v2
+      document:
+        version: 1
+        subjects:
+          aliases:
+            "service:billing-v2": ["service:billing-api"]
+
+  - as: migrating
+    remember:
+      subject: "service:billing"
+      predicate: deployed_version
+      value: "3.0.0"
+      text: "billing is running 3.0.0"
+
+  - as: payments
+    remember:
+      subject: "service:billing"
+      predicate: deployed_version
+      value: "2.15.0"
+      text: "billing is running 2.15.0"
+
+  - as: migrating
+    journal: { scope: "project:billing-v2" }
+    expect:
+      - { kind: policy_applied }
+      - { kind: claim_written, content: { subject: "service:billing-v2" } }
+
+  - as: payments
+    journal: { scope: "project:payments" }
+    expect: [ { kind: claim_written, content: { subject: "service:billing-api" } } ]

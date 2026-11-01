@@ -46,6 +46,9 @@ pub struct ClaimResult {
     pub claim_id: ClaimId,
     pub status: Status,
     pub trust: f64,
+    /// Advice on writing the claim the way the policy expects, such as a declared predicate to
+    /// use instead of an undeclared one.
+    pub hints: Vec<String>,
 }
 
 /// Recall what is known about a subject or question.
@@ -95,6 +98,36 @@ pub struct RecalledClaim {
 #[serde(deny_unknown_fields)]
 pub struct JournalQuery {
     pub scope: Scope,
+}
+
+/// Apply a policy document to the tenant, or to one project as an overlay on the tenant's.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApplyPolicy {
+    /// The policy document, as YAML or JSON text.
+    pub document: String,
+    /// The project to overlay. Without one, the document becomes the tenant policy.
+    pub project: Option<String>,
+}
+
+/// The policy version an apply created.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PolicyApplied {
+    pub policy_version: String,
+    /// `org`, or the project the version overlays.
+    pub scope: Scope,
+    /// How many predicates the version declares, counting those of the packs it extends.
+    pub predicates: u64,
+    /// How many aliases it declares.
+    pub aliases: u64,
+}
+
+/// Read the policy in effect.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyQuery {
+    /// Include this project's overlay. Without one, the tenant policy alone.
+    pub project: Option<String>,
 }
 
 /// What a reindex rebuilt.

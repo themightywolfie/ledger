@@ -78,7 +78,8 @@ impl Ledger {
     async fn browse(&self, caller: &Caller, q: Browse) -> Result<Page<ReviewItem>>; // claims, conflicts, questions, journal, undeclared predicates
     async fn claim(&self, caller: &Caller, id: ClaimId) -> Result<ClaimDetail>;      // trust breakdown, evidence, chain, entries
     async fn answer(&self, caller: &Caller, req: Answer) -> Result<AnswerOutcome>;  // open questions, human confirmations
-    async fn apply_policy(&self, caller: &Caller, req: ApplyPolicy) -> Result<PolicyVersion>;
+    async fn apply_policy(&self, caller: &Caller, req: ApplyPolicy) -> Result<PolicyApplied>;
+    async fn policy(&self, caller: &Caller, q: PolicyQuery) -> Result<Policy>;      // the tenant's, or a project's with its overlay
 
     // Administration.
     async fn backup(&self, caller: &Caller, sink: impl AsyncWrite) -> Result<BackupManifest>;
@@ -108,7 +109,7 @@ A correction is not a separate operation. It is `remember` called through the vi
 - The same journal plus the same policy versions always produce the same projections (ADR-0010).
 - `recall` never waits on a verifier. `check_before_act` waits for at most its re-verification budget (2 s by default) and answers `re-verify` if the budget runs out.
 
-**Error modes** are a closed set that every surface maps to its own conventions: `ScopeDenied`, `PermissionDenied`, `NotFound`, `InvalidClaim` (with field errors), `ChainBroken` (reindex and restore refuse a journal that doesn't verify; `verify` itself reports, never fails), `RestoreTargetNotEmpty`, `Busy` (writes kept the operation from finishing, such as reindex after three interrupted attempts), `VerifierUnavailable`, `Internal`.
+**Error modes** are a closed set that every surface maps to its own conventions: `ScopeDenied`, `PermissionDenied`, `NotFound`, `InvalidClaim` (with field errors), `InvalidPolicy` (naming the path that is wrong; nothing is applied), `ChainBroken` (reindex and restore refuse a journal that doesn't verify; `verify` itself reports, never fails), `RestoreTargetNotEmpty`, `Busy` (writes kept the operation from finishing, such as reindex after three interrupted attempts), `VerifierUnavailable`, `Internal`.
 
 ### What the engine hides
 
@@ -207,6 +208,7 @@ The MCP surface uses `rmcp` (the official Rust SDK), which implements the 2026-0
 Cargo.toml                    workspace
 crates/
   ledgermem-core/             engine, domain types, ports (no database, HTTP or model dependencies)
+    policies/                 predicate packs, built into the binary: software-delivery.yaml, personal-assistant.yaml
   ledgermem-sqlite/           Store adapter: SQLite, FTS5 full-text, vector search
   ledgermem-verifiers/        built-in verifiers and the exec protocol runner
   ledgermem-models/           embedders and language-model providers (feature-gated)
@@ -214,7 +216,6 @@ crates/
   ledgermem/                  the binary: CLI, config loading, wiring adapters into the engine
   ledgermem-scenarios/        integrity scenario suite and seed data (not published)
 web/                          the visualizer (React + TypeScript + Vite), built into ledgermem-server
-policies/                     predicate packs: software-delivery.yaml, personal-assistant.yaml
 docs/
   adr/                        decisions
   design/                     this document and its companions
@@ -225,7 +226,7 @@ Crate boundaries enforce the seams at compile time. `ledgermem-core` cannot impo
 
 | Crate | Depends on | Notable libraries |
 | --- | --- | --- |
-| ledgermem-core | none of the others | serde, serde_json, serde_jcs (RFC 8785), sha2, time, ulid, thiserror |
+| ledgermem-core | none of the others | serde, serde_json, serde_jcs (RFC 8785), serde_yaml and serde_path_to_error (policy documents), sha2, time, ulid, thiserror, strsim (predicate hints), unicode-normalization and caseless (text comparison) |
 | ledgermem-sqlite | core | rusqlite (bundled, FTS5) |
 | ledgermem-verifiers | core | gix, reqwest, quick-xml, tokio process |
 | ledgermem-models | core | fastembed (feature `local-embeddings`, default on), reqwest |
@@ -243,7 +244,7 @@ The journal is the source of truth and every other table is a projection (ADR-00
 | --- | --- | --- |
 | `entries` | truth | Every journal entry: scope key, sequence, kind, content hash, previous hash, chain hash, actor, channel, recorded time, policy version, and the content (nullable once forgotten). |
 | `evidence_blobs` | truth | Evidence metadata and, where small, the observed payload, keyed by content hash. |
-| `policy_versions` | truth | Each applied policy document, keyed by version. |
+| `policies` | projection | The policy version in effect in each scope: the last `policy_applied` entry in the org journal, and in each project journal that has an overlay. Every version stays in the journal. |
 | `tenants`, `keys` | truth | Tenants and hashed API keys with permissions and scope bounds. Kept outside the journal, because they are credentials rather than memory. |
 | `claims` | projection | Current state of every claim: key, value, status, valid time, trust components, freshness, supersession links. |
 | `conflict_sets`, `questions` | projection | Open and closed conflict sets and open questions. |

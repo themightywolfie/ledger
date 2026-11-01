@@ -1,6 +1,9 @@
 //! Opening a database whose schema this build doesn't use fails up front, with a reason, instead
 //! of failing later on the first write.
 
+use std::sync::Arc;
+
+use ledgermem_core::{ApplyPolicy, Caller, Channel, Ledger, Permission, PolicyQuery, SystemClock};
 use ledgermem_sqlite::SqliteStore;
 
 #[test]
@@ -51,6 +54,37 @@ fn a_database_reopens_after_it_was_created() {
     drop(SqliteStore::open(&path).unwrap());
 
     SqliteStore::open(&path).expect("a database this build created reopens");
+}
+
+#[tokio::test]
+async fn a_database_from_schema_version_1_is_brought_up_to_date_and_takes_a_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ledgermem.db");
+    // Version 1 had every table this build creates except policies.
+    drop(SqliteStore::open(&path).unwrap());
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch("DROP TABLE policies; PRAGMA user_version = 1;")
+        .unwrap();
+
+    let ledger = Ledger::new(
+        Arc::new(SqliteStore::open(&path).unwrap()),
+        Arc::new(SystemClock),
+    );
+    ledger.open_tenant("local").await.unwrap();
+    let operator = Caller::operator("local", "test", Channel::Cli)
+        .with_permissions([Permission::Read, Permission::Operator]);
+    let apply = ApplyPolicy {
+        document: "version: 1\nextends: [software-delivery]\n".into(),
+        project: None,
+    };
+    ledger.apply_policy(&operator, apply).await.unwrap();
+
+    let policy = ledger
+        .policy(&operator, PolicyQuery { project: None })
+        .await
+        .unwrap();
+    assert_eq!(policy.packs, ["software-delivery"]);
 }
 
 #[test]

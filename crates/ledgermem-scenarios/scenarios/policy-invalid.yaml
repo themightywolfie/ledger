@@ -1,0 +1,62 @@
+name: an invalid policy document is rejected whole, naming the path of what is wrong
+clock: 2026-11-01T09:00:00Z
+callers:
+  operator: { kind: operator }
+steps:
+  - as: operator
+    apply_policy:
+      document:
+        version: 1
+        predicates:
+          test_status: { value_type: { enum: [passing, failing] } }
+          deploy_count: { value_type: integer }
+    expect: { error: { code: invalid_policy, message: "invalid policy at predicates.deploy_count.value_type: unknown variant `integer`, expected one of `text`, `number`, `boolean`, `datetime`, `version`, `subject`, `enum`; nothing was applied" } }
+
+  - as: operator
+    apply_policy:
+      document:
+        version: 1
+        predicates:
+          test_status: { cardinalty: single }
+    expect: { error: { code: invalid_policy, message: "invalid policy at predicates.test_status.cardinalty: unknown field `cardinalty`, expected one of `cardinality`, `value_type`, `freshness`, `reverify_after`, `system_of_record`, `verifier`, `agent_claims`, `authority`, `instruction`; nothing was applied" } }
+
+  - as: operator
+    apply_policy:
+      document: { version: 1, extends: [software-delivery, software-deliver] }
+    expect: { error: { code: invalid_policy, message: "invalid policy at extends[1]: there is no predicate pack named \"software-deliver\"; the packs are software-delivery and personal-assistant; nothing was applied" } }
+
+  - as: operator
+    apply_policy:
+      document:
+        version: 1
+        subjects:
+          aliases:
+            "service:billing-api": ["service:billing"]
+            "service:payments": ["service:pay", "service:billing"]
+    expect: { error: { code: invalid_policy, message: "invalid policy at subjects.aliases.service:payments[1]: service:billing is already an alias of service:billing-api; nothing was applied" } }
+
+  - as: operator
+    apply_policy:
+      document:
+        version: 1
+        predicates:
+          deployed_version: { freshness: volatile, reverify_after: 1 hour, verifier: { use: kubectl } }
+    expect: { error: { code: invalid_policy, message: "invalid policy at predicates.deployed_version.reverify_after: \"1 hour\" is not an interval like 45s, 30m, 1h or 90d; nothing was applied" } }
+
+  - as: operator
+    apply_policy:
+      document: { version: 2 }
+    expect: { error: { code: invalid_policy, message: "invalid policy at version: this ledgermem reads version 1 policy documents, not version 2; nothing was applied" } }
+
+  - as: operator
+    apply_policy:
+      document: "version: 1\npredicates:\n  test_status: [passing\n"
+    expect: { error: { code: invalid_policy, message: "invalid policy: did not find expected ',' or ']' at line 4 column 1, while parsing a flow sequence at line 3 column 16; nothing was applied" } }
+
+  - as: operator
+    show_policy: {}
+    expect: { versions: [] }
+
+  - as: operator
+    journal: { scope: org }
+    expect: []

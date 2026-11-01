@@ -7,14 +7,16 @@ use serde_json::Value;
 use time::Duration;
 
 use crate::caller::{Caller, Permission};
-use crate::claim::{Claim, ClaimId, Source, SourceKind, Status};
+use crate::claim::{Claim, ClaimId, Scope, ScopeLevel, Source, SourceKind, Status};
 use crate::clock::Clock;
 use crate::error::{Error, Result};
 use crate::journal::{self, EntryKind, JournalEntry, NewEntry, StoredEntry};
 use crate::ops::{
-    BrokenLink, ChainReport, ClaimResult, JournalQuery, ReadIntent, ReadPack, Recall,
-    RecalledClaim, ReindexReport, Remember, RememberOutcome, ScopeVerification,
+    ApplyPolicy, BrokenLink, ChainReport, ClaimResult, JournalQuery, PolicyApplied, PolicyQuery,
+    ReadIntent, ReadPack, Recall, RecalledClaim, ReindexReport, Remember, RememberOutcome,
+    ScopeVerification,
 };
+use crate::policy::{self, Policy, PolicyVersion};
 use crate::store::{Commit, JournalHead, Projection, Store};
 
 /// The tenant a local install serves, created on first launch.
@@ -51,10 +53,13 @@ impl Ledger {
     }
 
     /// Proposes claims. Each one is appended to its scope's journal before any read can see it.
+    /// Subjects are resolved through the policy's aliases and values checked against their
+    /// predicates' declared types. If any claim fails a check, none is remembered.
     pub async fn remember(&self, caller: &Caller, req: Remember) -> Result<RememberOutcome> {
         caller.require(Permission::Propose)?;
         let now = self.clock.now();
         let scope = caller.default_write_scope();
+        let policy = self.policy_in(&caller.tenant, caller.bounds.project.as_deref())?;
         let source = Source {
             kind: SourceKind::for_channel(caller.channel),
             actor: caller.actor.clone(),
@@ -63,13 +68,29 @@ impl Ledger {
 
         let mut commit = Commit::default();
         let mut results = Vec::with_capacity(req.claims.len());
-        for input in req.claims {
+        for (index, input) in req.claims.into_iter().enumerate() {
+            let invalid = |field: &str, reason: String| {
+                Error::InvalidClaim(format!(
+                    "claims[{index}].{field}: {reason}; nothing was remembered"
+                ))
+            };
+            if !policy::is_subject(&input.subject) {
+                let reason = format!(
+                    "{:?} is not a subject like service:billing-api",
+                    input.subject
+                );
+                return Err(invalid("subject", reason));
+            }
+            let value = policy
+                .check_value(&input.predicate, input.value)
+                .map_err(|reason| invalid("value", reason))?;
+            let hints = policy.hint_for(&input.predicate).into_iter().collect();
             let claim = Claim {
                 id: ClaimId::generate(now),
                 scope: scope.clone(),
-                subject: input.subject,
+                subject: policy.canonical_subject(&input.subject),
                 predicate: input.predicate,
-                value: input.value,
+                value,
                 text: input.text,
                 source: source.clone(),
                 status: Status::Proposed,
@@ -81,6 +102,7 @@ impl Ledger {
                 claim_id: claim.id.clone(),
                 status: claim.status,
                 trust: claim.source.kind.prior(),
+                hints,
             });
             let entry = NewEntry {
                 id: NewEntry::generate_id(now),
@@ -141,6 +163,47 @@ impl Ledger {
             .into_iter()
             .map(readable)
             .collect()
+    }
+
+    /// Applies a policy document to the tenant, or to one project as an overlay on the tenant's.
+    /// The new version is journaled in the scope it applies to, and takes effect at once.
+    pub async fn apply_policy(&self, caller: &Caller, req: ApplyPolicy) -> Result<PolicyApplied> {
+        caller.require(Permission::Operator)?;
+        let now = self.clock.now();
+        let scope = policy_scope(req.project.as_deref())?;
+        let version = PolicyVersion::new(scope.clone(), &req.document, now)?;
+        let declared = Policy::layered(std::slice::from_ref(&version));
+        let entry = NewEntry {
+            id: NewEntry::generate_id(now),
+            scope: scope.clone(),
+            kind: EntryKind::PolicyApplied,
+            actor: caller.actor.clone(),
+            channel: caller.channel,
+            recorded_at: now,
+            content: serde_json::to_value(&version).map_err(internal)?,
+        };
+        let commit = Commit {
+            projections: projections_for(entry.kind, &entry.content)?,
+            entries: vec![entry],
+        };
+        self.store.commit(&caller.tenant, commit)?;
+        Ok(PolicyApplied {
+            policy_version: version.id,
+            scope,
+            predicates: declared.predicates.len() as u64,
+            aliases: declared.alias_count() as u64,
+        })
+    }
+
+    /// The policy in effect for the tenant, or for one project with its overlay. Operators may
+    /// read any project's; other callers only one within their bounds.
+    pub async fn policy(&self, caller: &Caller, query: PolicyQuery) -> Result<Policy> {
+        caller.require(Permission::Read)?;
+        let scope = policy_scope(query.project.as_deref())?;
+        if !caller.permissions.contains(&Permission::Operator) {
+            caller.require_visible(&scope)?;
+        }
+        self.policy_in(&caller.tenant, query.project.as_deref())
     }
 
     /// Re-derives every journal in the tenant and reports the first broken link in each.
@@ -221,6 +284,16 @@ impl Ledger {
         }))
     }
 
+    /// The tenant policy, with `project`'s overlay on top when there is one.
+    fn policy_in(&self, tenant: &str, project: Option<&str>) -> Result<Policy> {
+        let overlay = project.map(|project| Scope::new(ScopeLevel::Project, project));
+        let mut versions = Vec::new();
+        for scope in std::iter::once(Scope::org()).chain(overlay) {
+            versions.extend(self.store.policy(tenant, &scope)?);
+        }
+        Ok(Policy::layered(&versions))
+    }
+
     /// Every journal in the tenant as stored, read as one snapshot, each with its first broken
     /// link, if any.
     fn read_journals(&self, tenant: &str) -> Result<Vec<Journal>> {
@@ -254,11 +327,22 @@ fn readable(stored: StoredEntry) -> Result<JournalEntry> {
 fn distinct_claims(projections: &[Projection]) -> u64 {
     projections
         .iter()
-        .map(|projection| match projection {
-            Projection::PutClaim(claim) => claim.id.as_str(),
+        .filter_map(|projection| match projection {
+            Projection::PutClaim(claim) => Some(claim.id.as_str()),
+            Projection::PutPolicy(_) => None,
         })
         .collect::<BTreeSet<_>>()
         .len() as u64
+}
+
+/// The scope a policy applies to: the project it overlays, or `org` for the tenant policy.
+fn policy_scope(project: Option<&str>) -> Result<Scope> {
+    let Some(project) = project else {
+        return Ok(Scope::org());
+    };
+    format!("project:{project}")
+        .parse()
+        .map_err(|_| Error::NotFound(format!("{project:?} is not a project id")))
 }
 
 /// The projector: the projection updates a journal entry implies (ADR-0010). Live writes and
@@ -268,6 +352,10 @@ fn projections_for(kind: EntryKind, content: &Value) -> Result<Vec<Projection>> 
         EntryKind::ClaimWritten => {
             let claim = serde_json::from_value(content.clone()).map_err(internal)?;
             Ok(vec![Projection::PutClaim(claim)])
+        }
+        EntryKind::PolicyApplied => {
+            let version = serde_json::from_value(content.clone()).map_err(internal)?;
+            Ok(vec![Projection::PutPolicy(version)])
         }
     }
 }

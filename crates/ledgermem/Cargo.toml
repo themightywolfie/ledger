@@ -14,6 +14,7 @@ ledgermem-core.workspace = true
 ledgermem-server.workspace = true
 ledgermem-sqlite.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
