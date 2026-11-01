@@ -9,8 +9,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::OffsetDateTime;
 
-use crate::claim::{ClaimId, Scope, SourceKind, Status};
+use crate::claim::{ClaimId, Evidence, RetractionReason, Scope, SourceKind, Status};
 use crate::trust::Trust;
+use crate::verifier::Outcome;
 
 /// Propose claims for memory.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -34,6 +35,10 @@ pub struct ClaimInput {
     pub value: Value,
     /// A one-sentence natural-language rendering of the claim.
     pub text: String,
+    /// What you observed through your tools that backs the claim. It is recorded, but a claim
+    /// about your own work stays proposed until its verifier checks it.
+    #[serde(default)]
+    pub evidence: Vec<EvidenceInput>,
     /// For something the user told you about themselves: their exact words.
     pub relayed_user_statement: Option<RelayedUserStatement>,
     /// Where you read the claim, if it wasn't from your own tools or the user: a web page, a
@@ -59,11 +64,42 @@ impl ClaimInput {
             predicate: predicate.into(),
             value,
             text: text.into(),
+            evidence: Vec::new(),
             relayed_user_statement: None,
             reported_source: None,
             source: None,
         }
     }
+}
+
+/// Something a caller observed through one of its own tools.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct EvidenceInput {
+    /// What kind of evidence it is. Only `tool_result`, the default.
+    #[serde(default)]
+    pub kind: EvidenceInputKind,
+    /// The tool you observed it through, such as `kubectl.get_deployment`.
+    pub tool: String,
+    /// What the tool looked at, such as `deployment/billing-api`.
+    #[serde(rename = "ref")]
+    pub reference: Option<String>,
+    /// What it returned that bears on the claim, such as `image: billing-api:2.14.0`.
+    pub excerpt: Option<String>,
+    /// When you observed it, in RFC 3339. Defaults to now, and can't be later.
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
+    pub observed_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub enum EvidenceInputKind {
+    /// The output of a tool you called.
+    #[default]
+    ToolResult,
 }
 
 /// The user's own words, as an agent relays them.
@@ -106,12 +142,67 @@ pub struct RememberOutcome {
 pub struct ClaimResult {
     pub claim_id: ClaimId,
     pub status: Status,
+    /// Why the claim was retracted, when it was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<RetractionReason>,
+    /// Whether the predicate's verifier checked the claim as it was written.
+    pub verification: Verification,
     /// Verified, and scored at or above the trusted threshold.
     pub trusted: bool,
     /// The claim's trust as written, with its components.
     pub trust: Trust,
     /// Advice on the claim as written: a declared predicate to use instead of an undeclared one,
     /// or why the write gate treated the claim as it did, such as why it was quarantined.
+    pub hints: Vec<String>,
+}
+
+/// Whether a claim's verifier checked it as it was written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Verification {
+    /// Nothing checked it: its predicate declares no verifier this server has, or the write gate
+    /// quarantined it.
+    #[serde(rename = "none")]
+    Unchecked,
+    /// Its verifier ran inline, and the claim's status shows the outcome.
+    Done,
+}
+
+/// Attach evidence to a claim, or ask Ledger to check it now against its verifier.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct Attest {
+    /// The claim to attest, as `memory_remember` or `memory_recall` returned it.
+    pub claim_id: ClaimId,
+    /// What you observed through your tools that bears on the claim.
+    #[serde(default)]
+    pub evidence: Vec<EvidenceInput>,
+    /// Whether to check the claim against its predicate's verifier now. Defaults to true.
+    #[serde(default = "verify_now_by_default")]
+    pub verify_now: bool,
+}
+
+fn verify_now_by_default() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AttestOutcome {
+    pub claim_id: ClaimId,
+    /// What checking the claim found. Inconclusive when nothing could check it.
+    pub outcome: Outcome,
+    pub status: Status,
+    /// Why the claim was retracted, when it was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<RetractionReason>,
+    /// Verified, and scored at or above the trusted threshold.
+    pub trusted: bool,
+    /// The claim's trust now, with its components.
+    pub trust: Trust,
+    /// The evidence this call attached, each piece hashed and timestamped.
+    pub evidence: Vec<Evidence>,
+    /// Why the claim didn't pass, or why nothing checked it.
     pub hints: Vec<String>,
 }
 

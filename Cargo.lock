@@ -567,6 +567,7 @@ dependencies = [
  "ledgermem-core",
  "ledgermem-server",
  "ledgermem-sqlite",
+ "ledgermem-verifiers",
  "rmcp",
  "rusqlite",
  "serde",
@@ -645,6 +646,10 @@ name = "ledgermem-verifiers"
 version = "0.1.0"
 dependencies = [
  "ledgermem-core",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

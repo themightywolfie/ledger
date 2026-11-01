@@ -18,6 +18,7 @@ fn policy() -> Policy {
           summary: { value_type: text }
           replicas: { value_type: number }
           released_at: { value_type: datetime }
+          canary_enabled: { value_type: boolean }
         ",
     )
     .unwrap()
@@ -157,7 +158,7 @@ fn subjects_are_the_same_after_alias_resolution() {
 fn enum_members_and_booleans_are_the_same_only_when_identical() {
     assert!(same("test_status", json!("passing"), json!("passing")));
     assert!(!same("test_status", json!("passing"), json!("Passing")));
-    assert!(!same("branch_exists", json!(true), json!(false)));
+    assert!(!same("canary_enabled", json!(true), json!(false)));
 }
 
 #[test]

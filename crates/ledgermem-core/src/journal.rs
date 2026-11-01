@@ -25,6 +25,11 @@ use crate::ops::{BrokenLink, ChainProblem};
 #[serde(rename_all = "snake_case")]
 pub enum EntryKind {
     ClaimWritten,
+    /// Evidence was attached to a claim already written.
+    EvidenceAttached,
+    /// A claim moved to another status, such as a proposed claim becoming verified.
+    StatusChanged,
+    ClaimRetracted,
     PolicyApplied,
 }
 
@@ -233,6 +238,11 @@ fn name_of(value: impl Serialize) -> String {
 
 fn from_name<T: serde::de::DeserializeOwned>(name: &str) -> Option<T> {
     serde_json::from_value(Value::String(name.to_owned())).ok()
+}
+
+/// `sha256:` over the canonical JSON of `value`, the way journal content is hashed.
+pub(crate) fn content_hash(value: &impl Serialize) -> String {
+    sha256(&serde_jcs::to_vec(value).expect("hashed content is plain JSON"))
 }
 
 fn sha256(bytes: &[u8]) -> String {

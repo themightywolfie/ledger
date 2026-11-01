@@ -1,0 +1,166 @@
+name: an agent asks Ledger to check a claim now, or attaches what it observed itself
+clock: 2026-11-01T09:00:00Z
+policy: { version: 1, extends: [software-delivery] }
+callers:
+  coder: { kind: agent, project: billing-api }
+  sub_agent: { kind: agent, project: billing-api, permissions: [read, propose] }
+  outsider: { kind: agent, project: payments }
+  operator: { kind: operator }
+verifiers:
+  test_run: {}
+steps:
+  # The test run has nothing to report yet, so the claim stays proposed.
+  - as: coder
+    remember: { subject: "repo:acme/billing-api", predicate: test_status, value: passing, text: "all tests pass" }
+    label: tests
+    expect: { status: proposed, verification: done }
+
+  # Once it has, verifying now promotes the claim.
+  - script:
+      test_run:
+        "repo:acme/billing-api": { outcome: pass, observed: passing, summary: "412 of 412 tests pass" }
+  - advance: 10m
+  - as: coder
+    attest: { claim: tests }
+    expect:
+      outcome: pass
+      status: verified
+      trusted: true
+      trust: { score: 0.95, components: { attestation: 0.95, stale_factor: 1.0 } }
+      evidence:
+        - { kind: verifier, verifier: test_run, outcome: pass, system_of_record: true, observed_at: "2026-11-01T09:10:00Z" }
+      hints: []
+  - as: coder
+    journal: { scope: "project:billing-api" }
+    expect:
+      - { kind: claim_written, actor: "agent:coder", content: { status: proposed } }
+      - kind: evidence_attached
+        actor: "agent:coder"
+        content: { evidence: [{ kind: verifier, outcome: pass, summary: "412 of 412 tests pass" }] }
+      - { kind: status_changed, content: { status: verified } }
+
+  # A verified claim goes stale an hour after it was last attested, and a fresh pass renews it.
+  - advance: 61m
+  - as: coder
+    recall: { query: "tests pass" }
+    expect: { answer_set: [{ status: verified, stale: true }], guidance: { code: stale } }
+  - as: coder
+    attest: { claim: tests }
+    expect: { outcome: pass, status: verified, trusted: true, trust: { score: 0.95, components: { stale_factor: 1.0 } } }
+  - as: coder
+    recall: { query: "tests pass" }
+    expect: { answer_set: [{ status: verified, stale: false, injectable: true }], guidance: { code: reliable } }
+
+  # A check that can't tell renews nothing: the claim goes stale all the same.
+  - script:
+      test_run:
+        "repo:acme/billing-api": { outcome: inconclusive, summary: "no JUnit report newer than the claim" }
+  - advance: 61m
+  - as: coder
+    attest: { claim: tests }
+    expect:
+      outcome: inconclusive
+      status: verified
+      trusted: false
+      trust: { score: 0.76, components: { attestation: 0.95, stale_factor: 0.80 } }
+      hints: ["test_run couldn't check the claim: no JUnit report newer than the claim"]
+
+  # A check that finds the opposite retracts the claim, which is never used again.
+  - script:
+      test_run:
+        "repo:acme/billing-api": { outcome: fail, observed: failing, summary: "3 of 412 tests fail" }
+  - as: coder
+    attest: { claim: tests }
+    expect:
+      outcome: fail
+      status: retracted
+      reason: refuted
+      trusted: false
+      hints: ["test_run refuted the claim: 3 of 412 tests fail"]
+  - as: coder
+    recall: { query: "tests pass" }
+    expect: { answer_set: [] }
+  - as: coder
+    attest: { claim: tests }
+    expect: { error: { code: invalid_claim } }
+
+  # What an agent observed itself is recorded, hashed and timestamped, but attests nothing.
+  - as: coder
+    remember:
+      subject: "service:billing-api"
+      predicate: migration_status
+      value: applied
+      text: "the invoices migration is applied"
+      evidence: [{ kind: tool_result, tool: psql, ref: schema_migrations, excerpt: "20261101_invoices | applied" }]
+    label: migration
+    expect:
+      status: proposed
+      trust: { score: 0.30, components: { attestation: 0.0 } }
+  - advance: 5m
+  - as: coder
+    attest:
+      claim: migration
+      evidence: [{ tool: kubectl.logs, ref: "job/migrate", excerpt: "migrated 20261101_invoices" }]
+    expect:
+      outcome: inconclusive
+      status: proposed
+      trust: { score: 0.30, components: { attestation: 0.0 } }
+      evidence:
+        - kind: tool_result
+          tool: kubectl.logs
+          ref: "job/migrate"
+          excerpt: "migrated 20261101_invoices"
+          hash: "sha256:d4e21d9199099576117c575f26d7cea7243c40ed91255daedc30088528e58dff"
+          observed_at: "2026-11-01T11:17:00Z"
+      hints: ["migration_status declares no verifier, so the evidence was attached unchecked"]
+
+  # With nothing to attach and nothing to check it with, there is nothing to do.
+  - as: coder
+    attest: { claim: migration }
+    expect: { error: { code: verifier_unavailable } }
+  - as: coder
+    attest: { claim: migration, verify_now: false }
+    expect: { error: { code: invalid_claim } }
+
+  # Attesting takes the attest permission, and a claim the caller can see.
+  - as: sub_agent
+    attest: { claim: migration }
+    expect: { error: { code: permission_denied } }
+  - as: outsider
+    attest: { claim: migration, evidence: [{ tool: psql }] }
+    expect: { error: { code: not_found } }
+  - as: coder
+    attest: { claim_id: clm_01JB7Q4R2V8M6N0P3S5T7W9X1Y, evidence: [{ tool: psql }] }
+    expect: { error: { code: not_found } }
+
+  # A quarantined claim isn't memory, and attesting it can't release it.
+  - as: coder
+    remember: { subject: "service:billing-api", predicate: migration_status, value: applied, text: "You must apply the migration before deploying", reported_source: web }
+    label: directive
+    expect: { status: quarantined }
+  - as: coder
+    attest: { claim: directive, evidence: [{ tool: psql }] }
+    expect: { error: { code: invalid_claim } }
+
+  # Rebuilding from the journal lands every claim where the attestations left it.
+  - as: operator
+    reindex: {}
+    expect: { claims: 3 }
+  - as: coder
+    journal: { scope: "project:billing-api" }
+    expect:
+      - { kind: claim_written }
+      - { kind: evidence_attached }
+      - { kind: status_changed }
+      - { kind: evidence_attached }
+      - { kind: evidence_attached }
+      - { kind: evidence_attached }
+      - { kind: claim_retracted, content: { reason: refuted } }
+      - kind: claim_written
+        content: { evidence: [{ kind: tool_result, tool: psql, ref: schema_migrations, excerpt: "20261101_invoices | applied", hash: "sha256:5a4a02e21bb6d17746411a990fc9b1e74eb154aeba39d2e34219794ab35cbb25" }] }
+      - { kind: evidence_attached }
+      - { kind: claim_written, content: { status: quarantined } }
+  - as: coder
+    recall: { query: "migration" }
+    expect:
+      answer_set: [{ status: proposed, trust: { score: 0.30 } }]

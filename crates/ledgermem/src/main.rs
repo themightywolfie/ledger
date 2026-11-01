@@ -8,10 +8,11 @@ use std::sync::Arc;
 use clap::{Args, Parser, Subcommand};
 use ledgermem_core::{
     ApplyPolicy, Caller, ChainReport, Channel, LOCAL_TENANT, Ledger, Permission, PolicyApplied,
-    PolicyQuery, PredicatePack, ReindexReport, SystemClock,
+    PolicyQuery, PredicatePack, ReindexReport, SystemClock, VerifierName, Verifiers,
 };
 use ledgermem_server::mcp::{StdioLaunch, serve_stdio};
 use ledgermem_sqlite::SqliteStore;
+use ledgermem_verifiers::FileVerifier;
 use serde::Serialize;
 
 type BoxError = Box<dyn Error + Send + Sync>;
@@ -280,7 +281,16 @@ fn open_ledger(db: Option<PathBuf>) -> Result<Ledger, BoxError> {
         std::fs::create_dir_all(dir)?;
     }
     let store = SqliteStore::open(&path)?;
-    Ok(Ledger::new(Arc::new(store), Arc::new(SystemClock)))
+    Ok(Ledger::new(Arc::new(store), Arc::new(SystemClock)).with_verifiers(verifiers()?))
+}
+
+/// The built-in verifiers this server checks claims with. The file verifier reads under the
+/// working directory. The git verifier needs the local clones the server config names, so it
+/// arrives with that config (ticket #08).
+fn verifiers() -> Result<Verifiers, BoxError> {
+    let file = VerifierName::try_from("file".to_owned())?;
+    let root = std::env::current_dir()?;
+    Ok(Verifiers::new().with(file, Arc::new(FileVerifier::new(root))))
 }
 
 /// `%APPDATA%\ledgermem\ledgermem.db`, `~/.local/share/ledgermem/ledgermem.db` or

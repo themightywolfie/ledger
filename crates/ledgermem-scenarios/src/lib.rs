@@ -22,6 +22,20 @@
 //!
 //! The optional `policy` is applied to every tenant the callers use before the first step.
 //!
+//! The optional `verifiers` are scripted verifiers, registered under the names policies use, each
+//! answering by claim subject. A `script` step changes their answers mid-scenario:
+//!
+//! ```yaml
+//! verifiers:
+//!   test_run:
+//!     "repo:acme/billing-api": { outcome: fail, observed: failing, summary: "3 of 412 tests fail" }
+//! steps:
+//!   - script: { test_run: { "repo:acme/billing-api": { outcome: pass, observed: passing } } }
+//! ```
+//!
+//! Claim ids are generated, so a remember step can `label` the claim it writes, and an `attest`
+//! step can name it by that label as `claim`, in place of a `claim_id`.
+//!
 //! An `expect` is matched as a subset of the step's JSON outcome: objects need only the keys the
 //! scenario lists, arrays must have the same length, and numbers match within 1e-9.
 
@@ -29,8 +43,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ledgermem_core::{
-    ApplyPolicy, Caller, Channel, ClaimInput, JournalQuery, Ledger, Permission, PolicyQuery,
-    Recall, Remember, TestClock,
+    ApplyPolicy, Attest, Caller, Channel, ClaimInput, JournalQuery, Ledger, Observation, Outcome,
+    Permission, PolicyQuery, Recall, Remember, ScriptedVerifier, TestClock, Verifier, VerifierName,
+    Verifiers,
 };
 use ledgermem_sqlite::SqliteStore;
 use serde::Deserialize;
@@ -46,8 +61,27 @@ struct Scenario {
     /// A policy document applied to each tenant before the first step.
     policy: Option<serde_yaml::Value>,
     callers: BTreeMap<String, CallerSpec>,
+    /// Scripted verifiers, and what each answers at first.
+    #[serde(default)]
+    verifiers: Script,
     steps: Vec<Step>,
 }
+
+/// What scripted verifiers answer: for each verifier, an observation per claim subject.
+type Script = BTreeMap<VerifierName, BTreeMap<String, ScriptedObservation>>;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScriptedObservation {
+    outcome: Outcome,
+    #[serde(default)]
+    observed: Value,
+    /// Defaults to `scripted`.
+    summary: Option<String>,
+}
+
+/// The scenario's scripted verifiers, by name.
+type Scripted = BTreeMap<VerifierName, Arc<ScriptedVerifier>>;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -80,7 +114,13 @@ struct Step {
     #[serde(rename = "as")]
     caller: Option<String>,
     advance: Option<String>,
+    /// Changes what scripted verifiers answer from now on.
+    script: Option<Script>,
     remember: Option<ClaimInput>,
+    /// A name for the claim a remember step writes, which later attest steps can use.
+    label: Option<String>,
+    /// An attest request, naming the claim by `claim_id` or by the `claim` label it was given.
+    attest: Option<Value>,
     recall: Option<Recall>,
     journal: Option<JournalQuery>,
     /// Verify every journal in the caller's tenant. Takes no arguments: `verify: {}`.
@@ -121,6 +161,7 @@ fn document_text(document: serde_yaml::Value) -> Result<String, String> {
 /// The one engine operation a step plays.
 enum Action {
     Remember(ClaimInput),
+    Attest(Value),
     Recall(Recall),
     Journal(JournalQuery),
     Verify,
@@ -133,6 +174,7 @@ impl Step {
     fn take_action(&mut self) -> Result<Action, String> {
         let actions = [
             self.remember.take().map(Action::Remember),
+            self.attest.take().map(Action::Attest),
             self.recall.take().map(Action::Recall),
             self.journal.take().map(Action::Journal),
             self.verify.take().map(|_| Action::Verify),
@@ -147,8 +189,8 @@ impl Step {
         match (present.next(), present.next()) {
             (Some(action), None) => Ok(action),
             _ => Err(
-                "a step needs exactly one of remember, recall, journal, verify, reindex, \
-                      apply_policy or show_policy"
+                "a step needs exactly one of remember, attest, recall, journal, verify, \
+                      reindex, apply_policy or show_policy"
                     .into(),
             ),
         }
@@ -165,7 +207,18 @@ pub async fn run(yaml: &str) -> Result<(), String> {
         serde_yaml::from_str(yaml).map_err(|e| format!("unreadable scenario: {e}"))?;
     let clock = Arc::new(TestClock::new(scenario.clock));
     let store = SqliteStore::open_in_memory().map_err(|e| e.to_string())?;
-    let ledger = Ledger::new(Arc::new(store), clock.clone());
+    let scripted: Scripted = scenario
+        .verifiers
+        .keys()
+        .map(|name| (name.clone(), Arc::default()))
+        .collect();
+    let verifiers = scripted
+        .iter()
+        .fold(Verifiers::new(), |verifiers, (name, verifier)| {
+            verifiers.with(name.clone(), verifier.clone() as Arc<dyn Verifier>)
+        });
+    apply_script(&scripted, scenario.verifiers)?;
+    let ledger = Ledger::new(Arc::new(store), clock.clone()).with_verifiers(verifiers);
 
     let mut callers = BTreeMap::new();
     for (name, spec) in &scenario.callers {
@@ -196,14 +249,32 @@ pub async fn run(yaml: &str) -> Result<(), String> {
         }
     }
 
+    let world = World {
+        ledger,
+        clock,
+        scripted,
+        callers,
+    };
+    let mut labels = Labels::new();
     for (index, step) in scenario.steps.into_iter().enumerate() {
         let at = format!("{:?}, step {}", scenario.name, index + 1);
-        run_step(&ledger, &clock, &callers, step)
+        run_step(&world, &mut labels, step)
             .await
             .map_err(|e| format!("{at}: {e}"))?;
     }
     Ok(())
 }
+
+/// What a scenario's steps act on.
+struct World {
+    ledger: Ledger,
+    clock: Arc<TestClock>,
+    scripted: Scripted,
+    callers: BTreeMap<String, Caller>,
+}
+
+/// The ids of the claims remember steps labelled, by label.
+type Labels = BTreeMap<String, Value>;
 
 fn build_caller(name: &str, spec: &CallerSpec) -> Result<Caller, String> {
     use Permission::{Admin, Attest, DeclareSource, Operator, Propose, Read};
@@ -245,21 +316,42 @@ fn build_caller(name: &str, spec: &CallerSpec) -> Result<Caller, String> {
     })
 }
 
-async fn run_step(
-    ledger: &Ledger,
-    clock: &TestClock,
-    callers: &BTreeMap<String, Caller>,
-    mut step: Step,
-) -> Result<(), String> {
+/// Makes each scripted verifier answer as `script` says from now on.
+fn apply_script(scripted: &Scripted, script: Script) -> Result<(), String> {
+    for (name, subjects) in script {
+        let verifier = scripted.get(&name).ok_or_else(|| {
+            format!("script: {name} isn't a scripted verifier; declare it under `verifiers`")
+        })?;
+        for (subject, observation) in subjects {
+            let summary = observation.summary.unwrap_or_else(|| "scripted".to_owned());
+            verifier.script(
+                &subject,
+                Observation::new(observation.outcome, observation.observed, summary),
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn run_step(world: &World, labels: &mut Labels, mut step: Step) -> Result<(), String> {
+    let World {
+        ledger,
+        clock,
+        scripted,
+        callers,
+    } = world;
     if let Some(by) = &step.advance {
         clock.advance(parse_duration(by)?);
         return Ok(());
+    }
+    if let Some(script) = step.script.take() {
+        return apply_script(scripted, script);
     }
 
     let name = step
         .caller
         .as_deref()
-        .ok_or("a step needs `as` or `advance`")?;
+        .ok_or("a step needs `as`, `advance` or `script`")?;
     let caller = callers
         .get(name)
         .ok_or_else(|| format!("unknown caller {name:?}"))?;
@@ -269,12 +361,20 @@ async fn run_step(
             let remember = Remember {
                 claims: vec![claim],
             };
-            to_json(ledger.remember(caller, remember).await).map(|outcome| {
+            let outcome = to_json(ledger.remember(caller, remember).await).map(|outcome| {
                 outcome
                     .pointer("/results/0")
                     .cloned()
                     .unwrap_or(Value::Null)
-            })
+            });
+            if let (Some(label), Ok(outcome)) = (step.label.take(), &outcome) {
+                labels.insert(label, outcome["claim_id"].clone());
+            }
+            outcome
+        }
+        Action::Attest(request) => {
+            let attest = attest_request(request, labels)?;
+            to_json(ledger.attest(caller, attest).await)
         }
         Action::Recall(recall) => to_json(ledger.recall(caller, recall).await),
         Action::Journal(query) => to_json(ledger.journal(caller, query).await),
@@ -293,6 +393,20 @@ async fn run_step(
         Err(error) if expects_error => matches(&expected, &error, "outcome"),
         Err(error) => Err(format!("engine error: {error}")),
     }
+}
+
+/// An attest step's request, with the claim it names by label given by id.
+fn attest_request(mut request: Value, labels: &Labels) -> Result<Attest, String> {
+    if let Some(fields) = request.as_object_mut()
+        && let Some(label) = fields.remove("claim")
+    {
+        let id = label
+            .as_str()
+            .and_then(|label| labels.get(label))
+            .ok_or_else(|| format!("attest: no remember step is labelled {label}"))?;
+        fields.insert("claim_id".into(), id.clone());
+    }
+    serde_json::from_value(request).map_err(|e| format!("attest: {e}"))
 }
 
 /// Parses a duration such as `45s`, `38m`, `3h` or `90d`.

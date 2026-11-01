@@ -72,11 +72,10 @@ fn is_stale(claim: &Claim, policy: &Policy, now: OffsetDateTime) -> bool {
 fn score(claim: &Claim, stale: bool) -> Trust {
     let components = TrustComponents {
         prior: claim.source.kind.prior(),
-        // Every kind of evidence so far attests the claim; see Claim::last_attested_at.
         attestation: claim
             .evidence
             .iter()
-            .map(|evidence| evidence.kind.strength())
+            .filter_map(|evidence| evidence.kind.strength())
             .fold(0.0, f64::max),
         // Counted once the conflict engine relates claims to each other (ticket #09).
         corroboration: 0.0,

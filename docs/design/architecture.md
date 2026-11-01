@@ -187,7 +187,7 @@ A port exists only where at least two adapters are real. Each port is classified
 | Language-model provider | OpenAI-compatible, Anthropic; **scripted** (tests) | True external | Optional and off by default. Only the llm_judge verifier and future free-text extraction use it. |
 | Clock | system clock; **test clock** | In-process | Every time-dependent rule (staleness, valid time, as_of reads) is tested by moving the test clock. Nothing in the engine reads the wall clock directly. |
 
-The store port is deliberately **not** a generic key-value or SQL interface. It speaks in the engine's terms (append entries with projection updates, fetch candidates by claim key, hybrid search, read a chain, page a journal, queue jobs), so the Postgres adapter re-implements those terms rather than an ORM. No SQL appears above the store port (ADR-0001).
+The store port is deliberately **not** a generic key-value or SQL interface. It speaks in the engine's terms (append entries with projection updates, append them only if a journal still ends where it was read, fetch a claim or candidates by claim key, hybrid search, read a chain, page a journal, queue jobs), so the Postgres adapter re-implements those terms rather than an ORM. No SQL appears above the store port (ADR-0001).
 
 ## Surfaces
 
@@ -228,7 +228,7 @@ Crate boundaries enforce the seams at compile time. `ledgermem-core` cannot impo
 | --- | --- | --- |
 | ledgermem-core | none of the others | serde, serde_json, serde_jcs (RFC 8785), serde_yaml and serde_path_to_error (policy documents), sha2, time, ulid, thiserror, strsim (predicate hints), unicode-normalization and caseless (text comparison), regex (directive rules) |
 | ledgermem-sqlite | core | rusqlite (bundled, FTS5) |
-| ledgermem-verifiers | core | gix, reqwest, quick-xml, tokio process |
+| ledgermem-verifiers | core | sha2, tokio process (the git verifier runs the `git` command), reqwest, quick-xml |
 | ledgermem-models | core | fastembed (feature `local-embeddings`, default on), reqwest |
 | ledgermem-server | core | axum, utoipa, rmcp, rust-embed, argon2 |
 | ledgermem | all | clap, toml, tracing |
@@ -270,6 +270,7 @@ Formats for both are in [contracts.md](contracts.md).
 - Source kind is derived, never supplied (ADR-0009). Directives that aren't the user's own word are quarantined, and so are web, document or other-agent claims on what is the user's to state or tells agents what to do.
 - `ledgermem serve` binds to `127.0.0.1` by default. Binding elsewhere requires an explicit flag and logs a warning when no TLS terminator is configured.
 - Exec verifiers run without a shell, with a timeout and an environment allow-list, but are **not sandboxed** in v1 (ADR-0006).
+- The file verifier reads only under the server's working directory, so a claim can't point it at a file elsewhere on the machine. The git verifier reads only the clones server config names, and refuses a ref that git would read as an option.
 - Per-scope encryption at rest and PII redaction are out of scope for v1. Forget is in scope.
 
 ## Performance targets (p95, local SQLite, 100k claims per tenant)

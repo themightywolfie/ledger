@@ -1,12 +1,23 @@
 name: every trust score comes with its components, and only a verified claim at or above the threshold is trusted
 clock: 2026-11-01T09:00:00Z
-policy: { version: 1, extends: [software-delivery, personal-assistant] }
+policy:
+  version: 1
+  extends: [software-delivery, personal-assistant]
+  predicates:
+    deployed_version:
+      value_type: version
+      freshness: volatile
+      system_of_record: http.status_api
+      verifier: { use: http.status_api, params: { path: "/deploys/{subject_name}", pointer: /version } }
 callers:
   person: { kind: operator, channel: visualizer, permissions: [read, propose, operator] }
   assistant: { kind: agent, user: u_42, permissions: [read, propose, relay_user] }
   coder: { kind: agent, project: billing-api }
+verifiers:
+  http.status_api:
+    "service:checkout": { outcome: pass, observed: "2.14.0", summary: "the status API reports checkout at 2.14.0" }
 steps:
-  # The worked outcomes of claims-and-integrity.md, section 5, that need no verifier.
+  # The worked outcomes of claims-and-integrity.md, section 5, except the LLM judge's.
   # The user tells the visualizer "I'm vegetarian".
   - as: person
     remember:
@@ -50,6 +61,20 @@ steps:
         score: 0.30
         components: { prior: 0.30, attestation: 0.0, corroboration: 0.0, contradiction: 0.0, stale_factor: 1.0 }
 
+  # An agent says "deployed 2.14.0", and the deployment's system of record agrees.
+  - as: coder
+    remember:
+      subject: "service:checkout"
+      predicate: deployed_version
+      value: "2.14.0"
+      text: "checkout is running 2.14.0 in production"
+    expect:
+      status: verified
+      trusted: true
+      trust:
+        score: 0.95
+        components: { prior: 0.30, attestation: 0.95, corroboration: 0.0, contradiction: 0.0, stale_factor: 1.0 }
+
   # A read scores each claim again, with the same components.
   - as: person
     recall: { query: "vegetarian" }
@@ -72,6 +97,21 @@ steps:
     expect:
       answer_set:
         - { status: proposed, trusted: false, trust: { score: 0.30, components: { attestation: 0.0 } } }
+
+  # The verified deployment, 3 hours later: volatile claims go stale after an hour, so it is
+  # still verified, but neither trusted nor injectable.
+  - advance: 3h
+  - as: coder
+    recall: { query: "checkout running" }
+    expect:
+      answer_set:
+        - status: verified
+          stale: true
+          trusted: false
+          injectable: false
+          trust:
+            score: 0.76
+            components: { prior: 0.30, attestation: 0.95, corroboration: 0.0, contradiction: 0.0, stale_factor: 0.80 }
 
   # A score below the trusted threshold is never trusted, however it was verified.
   - as: person

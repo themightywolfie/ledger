@@ -1,15 +1,18 @@
 //! The write gate's classification: where a claim came from, what backs it at once, and whether it
-//! is let in as memory (claims-and-integrity.md, sections 2 and 3).
+//! is let in as memory (claims-and-integrity.md, sections 2 and 3). Also the intake of evidence a
+//! caller attaches.
 
 use std::sync::LazyLock;
 
 use regex::Regex;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
+use time::OffsetDateTime;
 
 use crate::caller::{Caller, Channel, Permission};
-use crate::claim::{EvidenceKind, SourceKind, Status};
-use crate::ops::{ClaimInput, RelayedUserStatement};
+use crate::claim::{Evidence, EvidenceKind, SourceKind, Status};
+use crate::journal;
+use crate::ops::{ClaimInput, EvidenceInput, EvidenceInputKind, RelayedUserStatement};
 use crate::policy::{Admitted, Authority, Policy, Predicate, ValueType, folded};
 
 /// What the write gate decided about one claim.
@@ -307,6 +310,51 @@ fn reads_as_directive(written: &str) -> Option<&'static str> {
             .any(|sentence| rule.is_match(sentence))
             .then_some(*reads_as)
     })
+}
+
+/// What a caller observed through its tools, as evidence. The error names the piece and field
+/// that are wrong and why, as `evidence[1].tool: …`.
+pub(crate) fn attached_evidence(
+    inputs: &[EvidenceInput],
+    now: OffsetDateTime,
+) -> Result<Vec<Evidence>, String> {
+    inputs
+        .iter()
+        .enumerate()
+        .map(|(index, input)| {
+            caller_evidence(input, now)
+                .map_err(|(field, reason)| format!("evidence[{index}].{field}: {reason}"))
+        })
+        .collect()
+}
+
+/// What a caller observed through one of its tools, as evidence: hashed, and timestamped when it
+/// was observed. It attests nothing until a verifier checks the claim. The error names the field
+/// that is wrong and why.
+fn caller_evidence(
+    input: &EvidenceInput,
+    now: OffsetDateTime,
+) -> Result<Evidence, (&'static str, String)> {
+    if input.tool.trim().is_empty() {
+        return Err(("tool", "name the tool you observed it through".into()));
+    }
+    let observed_at = input.observed_at.unwrap_or(now);
+    if observed_at > now {
+        return Err(("observed_at", "can't be later than now".into()));
+    }
+    let EvidenceInputKind::ToolResult = input.kind;
+    let hash = journal::content_hash(&json!({
+        "tool": input.tool, "ref": input.reference, "excerpt": input.excerpt
+    }));
+    Ok(Evidence::observed(
+        EvidenceKind::ToolResult {
+            tool: input.tool.clone(),
+            reference: input.reference.clone(),
+            excerpt: input.excerpt.clone(),
+            hash,
+        },
+        observed_at,
+    ))
 }
 
 fn quarantined(kind: SourceKind, reason: String, mut hints: Vec<String>) -> Classification {
