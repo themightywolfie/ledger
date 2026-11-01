@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::OffsetDateTime;
 
-use crate::claim::{ClaimId, Scope, Status};
+use crate::claim::{ClaimId, Scope, SourceKind, Status};
 
 /// Propose claims for memory.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -33,6 +33,66 @@ pub struct ClaimInput {
     pub value: Value,
     /// A one-sentence natural-language rendering of the claim.
     pub text: String,
+    /// For something the user told you about themselves: their exact words.
+    pub relayed_user_statement: Option<RelayedUserStatement>,
+    /// Where you read the claim, if it wasn't from your own tools or the user: a web page, a
+    /// document or another agent. It only ever lowers trust.
+    pub reported_source: Option<ReportedSource>,
+    /// Where an integration with the declare_source permission says the claim came from, as
+    /// `{ "kind": "tool_result" }`. Anyone else's is ignored, whatever it holds, because a claim's
+    /// source kind comes from the channel and key that wrote it (ADR-0009). Not offered to models.
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub source: Option<Value>,
+}
+
+impl ClaimInput {
+    /// A claim in the caller's own words, with no relayed or reported source.
+    pub fn new(
+        subject: impl Into<String>,
+        predicate: impl Into<String>,
+        value: Value,
+        text: impl Into<String>,
+    ) -> Self {
+        ClaimInput {
+            subject: subject.into(),
+            predicate: predicate.into(),
+            value,
+            text: text.into(),
+            relayed_user_statement: None,
+            reported_source: None,
+            source: None,
+        }
+    }
+}
+
+/// The user's own words, as an agent relays them.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct RelayedUserStatement {
+    /// Exactly what the user said, such as "I'm vegetarian".
+    pub quote: String,
+}
+
+/// Where a caller says it read a claim, which can make its source kind less trusted but never
+/// more.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub enum ReportedSource {
+    Web,
+    Document,
+    OtherAgent,
+}
+
+impl From<ReportedSource> for SourceKind {
+    fn from(reported: ReportedSource) -> Self {
+        match reported {
+            ReportedSource::Web => SourceKind::Web,
+            ReportedSource::Document => SourceKind::Document,
+            ReportedSource::OtherAgent => SourceKind::OtherAgent,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -46,8 +106,8 @@ pub struct ClaimResult {
     pub claim_id: ClaimId,
     pub status: Status,
     pub trust: f64,
-    /// Advice on writing the claim the way the policy expects, such as a declared predicate to
-    /// use instead of an undeclared one.
+    /// Advice on the claim as written: a declared predicate to use instead of an undeclared one,
+    /// or why the write gate treated the claim as it did, such as why it was quarantined.
     pub hints: Vec<String>,
 }
 

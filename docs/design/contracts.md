@@ -105,6 +105,10 @@ Shapes are abbreviated. The JSON Schemas generated from the Rust types are autho
     "hints": [] } ] }                // e.g. "undeclared predicate 'tests_passing'; did you mean 'test_status'?"
 ```
 
+`status` can also be `quarantined` (claims-and-integrity.md, section 3). Hints also say why a claim was quarantined, why a relayed user statement didn't count, and that a `source` was ignored.
+
+An integration key with `declare_source` sets the claim's source kind with `"source": { "kind": "tool_result" }`. Any kind except `system` is allowed. From any other caller, `source` is ignored with a hint, whatever it holds (ADR-0009). It is left out of the tool's schema, so models are never offered it.
+
 **`memory_attest`**: input `{ "claim_id", "evidence"?: [ … ], "verify_now"?: true }`. Output `{ "claim_id", "outcome": "pass|fail|inconclusive|pending", "status", "trusted", "trust" }`.
 
 **`memory_check_before_act`**

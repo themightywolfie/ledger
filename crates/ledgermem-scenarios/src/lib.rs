@@ -66,6 +66,8 @@ struct CallerSpec {
 #[serde(rename_all = "snake_case")]
 enum CallerKind {
     Agent,
+    /// A framework integration, which may declare where its claims came from.
+    Integration,
     /// A person looking after the tenant from the command line.
     Operator,
 }
@@ -199,21 +201,28 @@ pub async fn run(yaml: &str) -> Result<(), String> {
 }
 
 fn build_caller(name: &str, spec: &CallerSpec) -> Caller {
-    if let CallerKind::Operator = spec.kind {
-        let permissions = spec
-            .permissions
-            .clone()
-            .unwrap_or_else(|| vec![Permission::Read, Permission::Operator, Permission::Admin]);
-        return Caller::operator(&spec.tenant, name, Channel::Cli).with_permissions(permissions);
-    }
-    let agent = spec.agent.as_deref().unwrap_or(name);
-    let permissions = spec
-        .permissions
-        .clone()
-        .unwrap_or_else(|| vec![Permission::Read, Permission::Propose, Permission::Attest]);
-    let caller = Caller::agent(&spec.tenant, agent)
+    use Permission::{Admin, Attest, DeclareSource, Operator, Propose, Read};
+    let (caller, default_permissions) = match spec.kind {
+        CallerKind::Operator => {
+            let permissions = spec
+                .permissions
+                .clone()
+                .unwrap_or_else(|| vec![Read, Operator, Admin]);
+            return Caller::operator(&spec.tenant, name, Channel::Cli)
+                .with_permissions(permissions);
+        }
+        CallerKind::Agent => (
+            Caller::agent(&spec.tenant, spec.agent.as_deref().unwrap_or(name)),
+            vec![Read, Propose, Attest],
+        ),
+        CallerKind::Integration => (
+            Caller::integration(&spec.tenant, name),
+            vec![Read, Propose, Attest, DeclareSource],
+        ),
+    };
+    let caller = caller
         .with_user(&spec.user)
-        .with_permissions(permissions);
+        .with_permissions(spec.permissions.clone().unwrap_or(default_permissions));
     match &spec.project {
         Some(project) => caller.with_project(project),
         None => caller,

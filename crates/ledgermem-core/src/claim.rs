@@ -19,6 +19,10 @@ pub struct Claim {
     pub value: Value,
     pub text: String,
     pub source: Source,
+    /// What backs the claim. Written only when there is some, so claims without evidence keep
+    /// the content their journal entries were hashed with.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<Evidence>,
     pub status: Status,
     #[serde(with = "time::serde::rfc3339")]
     pub valid_from: OffsetDateTime,
@@ -26,6 +30,17 @@ pub struct Claim {
     pub valid_to: Option<OffsetDateTime>,
     #[serde(with = "time::serde::rfc3339")]
     pub recorded_at: OffsetDateTime,
+}
+
+impl Claim {
+    /// How far the claim is trusted on its own: its source prior, or its strongest evidence if
+    /// that is stronger.
+    pub fn trust(&self) -> f64 {
+        self.evidence
+            .iter()
+            .map(|evidence| evidence.kind.strength())
+            .fold(self.source.kind.prior(), f64::max)
+    }
 }
 
 /// A claim identifier: `clm_` followed by a ULID.
@@ -49,8 +64,9 @@ impl fmt::Display for ClaimId {
     }
 }
 
-/// Where a claim's source falls, decided by the channel it arrived through (ADR-0009).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Where a claim's source falls, decided by the channel it arrived through (ADR-0009). Declared
+/// most trusted first, so the greater of two kinds is the less trusted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceKind {
     System,
@@ -63,11 +79,15 @@ pub enum SourceKind {
 }
 
 impl SourceKind {
-    pub(crate) fn for_channel(channel: Channel) -> Self {
-        match channel {
-            Channel::Visualizer | Channel::Cli | Channel::Elicitation => SourceKind::UserStated,
-            // Integrations declare their source kind once `declare_source` lands (ticket #04).
-            Channel::Agent | Channel::Integration => SourceKind::AgentClaim,
+    fn as_str(self) -> &'static str {
+        match self {
+            SourceKind::System => "system",
+            SourceKind::UserStated => "user_stated",
+            SourceKind::ToolResult => "tool_result",
+            SourceKind::AgentClaim => "agent_claim",
+            SourceKind::Document => "document",
+            SourceKind::OtherAgent => "other_agent",
+            SourceKind::Web => "web",
         }
     }
 
@@ -84,12 +104,60 @@ impl SourceKind {
     }
 }
 
+impl fmt::Display for SourceKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Where a claim came from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Source {
     pub kind: SourceKind,
     pub actor: String,
     pub channel: Channel,
+}
+
+/// Something observable that backs a claim, and when it was observed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Evidence {
+    /// `evd_` followed by a ULID.
+    pub id: String,
+    #[serde(flatten)]
+    pub kind: EvidenceKind,
+    #[serde(with = "time::serde::rfc3339")]
+    pub observed_at: OffsetDateTime,
+}
+
+impl Evidence {
+    pub(crate) fn observed(kind: EvidenceKind, at: OffsetDateTime) -> Self {
+        Evidence {
+            id: format!("evd_{}", ulid::Ulid::from_datetime(at.into())),
+            kind,
+            observed_at: at,
+        }
+    }
+}
+
+/// What a piece of evidence is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EvidenceKind {
+    /// A person confirmed the claim through the visualizer or the command line.
+    HumanConfirmation,
+    /// An agent reported the user's exact words about the user's own preferences or identity,
+    /// holding relay_user.
+    RelayedUserStatement { quote: String },
+}
+
+impl EvidenceKind {
+    /// How strongly the evidence attests the claim (claims-and-integrity.md, section 5).
+    pub fn strength(&self) -> f64 {
+        match self {
+            EvidenceKind::HumanConfirmation => 0.90,
+            EvidenceKind::RelayedUserStatement { .. } => 0.80,
+        }
+    }
 }
 
 /// Where a claim stands in its lifecycle.

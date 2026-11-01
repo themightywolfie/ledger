@@ -35,12 +35,12 @@ fn operator() -> Caller {
 
 fn claim(predicate: &str, value: &str, text: &str) -> Remember {
     Remember {
-        claims: vec![ClaimInput {
-            subject: "service:billing-api".into(),
-            predicate: predicate.into(),
-            value: json!(value),
-            text: text.into(),
-        }],
+        claims: vec![ClaimInput::new(
+            "service:billing-api",
+            predicate,
+            json!(value),
+            text,
+        )],
     }
 }
 

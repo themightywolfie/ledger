@@ -94,6 +94,24 @@ async fn lists_remember_and_recall_and_recalls_a_remembered_claim_as_proposed() 
 }
 
 #[tokio::test]
+async fn remember_offers_models_relayed_and_reported_sources_but_never_a_source_kind() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = connect(&dir.path().join("ledgermem.db"), &[]).await;
+
+    let tools = client.list_all_tools().await.expect("tools/list");
+    client.cancel().await.expect("close client");
+
+    let remember = tools
+        .iter()
+        .find(|tool| tool.name == "memory_remember")
+        .expect("memory_remember");
+    let schema = serde_json::to_string(&remember.input_schema).unwrap();
+    assert!(schema.contains("\"relayed_user_statement\""), "{schema}");
+    assert!(schema.contains("\"reported_source\""), "{schema}");
+    assert!(!schema.contains("\"source\""), "{schema}");
+}
+
+#[tokio::test]
 async fn claims_outlive_the_server_in_the_database_named_by_db() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("ledgermem.db");
@@ -133,6 +151,56 @@ async fn an_argument_the_server_does_not_support_is_refused_not_ignored() {
     );
 
     client.cancel().await.expect("close client");
+}
+
+#[tokio::test]
+async fn a_stdio_server_relays_the_users_words_unless_launched_with_no_relay_user() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("ledgermem.db");
+    let policy = dir.path().join("ledgermem.policy.yaml");
+    std::fs::write(&policy, "version: 1\nextends: [personal-assistant]\n").unwrap();
+    let applied = std::process::Command::new(env!("CARGO_BIN_EXE_ledgermem"))
+        .args(["policy", "apply"])
+        .arg(&policy)
+        .arg("--db")
+        .arg(&db)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run ledgermem");
+    assert!(
+        applied.status.success(),
+        "{}",
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    let relayed = json!({ "claims": [ {
+        "subject": "user:local",
+        "predicate": "dietary_preference",
+        "value": "vegetarian",
+        "text": "the user is vegetarian",
+        "relayed_user_statement": { "quote": "I'm vegetarian" }
+    } ] });
+
+    let relaying = connect(&db, &[]).await;
+    let remembered = call(&relaying, "memory_remember", relayed.clone()).await;
+    relaying.cancel().await.expect("close client");
+    let withheld = connect(&db, &["--no-relay-user"]).await;
+    let not_relayed = call(&withheld, "memory_remember", relayed).await;
+    withheld.cancel().await.expect("close client");
+
+    let result = &remembered["results"][0];
+    assert_eq!(result["status"], "verified");
+    assert_eq!(result["trust"], 0.80);
+    assert_eq!(result["hints"], json!([]));
+    let result = &not_relayed["results"][0];
+    assert_eq!(result["status"], "proposed");
+    assert_eq!(result["trust"], 0.30);
+    assert_eq!(
+        result["hints"],
+        json!([
+            "relayed_user_statement doesn't count: agent:agent lacks the relay_user permission, \
+             so this is the agent's claim, not the user's"
+        ])
+    );
 }
 
 #[test]

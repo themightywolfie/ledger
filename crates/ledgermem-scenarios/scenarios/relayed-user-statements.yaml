@@ -1,0 +1,123 @@
+name: a relayed user statement counts only from an agent with relay_user, and only on what the user has authority over
+clock: 2026-11-01T09:00:00Z
+policy: { version: 1, extends: [software-delivery, personal-assistant] }
+callers:
+  assistant: { kind: agent, permissions: [read, propose, relay_user] }
+  remote: { kind: agent, permissions: [read, propose] }
+steps:
+  - as: assistant
+    remember:
+      subject: "user:local"
+      predicate: dietary_preference
+      value: vegetarian
+      text: "the user is vegetarian"
+      relayed_user_statement: { quote: "I'm vegetarian" }
+    expect: { status: verified, trust: 0.80, hints: [] }
+
+  # Without relay_user, an agent's report of the user's words is the agent's own claim.
+  - as: remote
+    remember:
+      subject: "user:local"
+      predicate: dietary_preference
+      value: vegan
+      text: "the user is vegan"
+      relayed_user_statement: { quote: "I'm vegan" }
+    expect:
+      status: proposed
+      trust: 0.30
+      hints: ["relayed_user_statement doesn't count: agent:remote lacks the relay_user permission, so this is the agent's claim, not the user's"]
+
+  # The user's word settles only what the user has authority over.
+  - as: assistant
+    remember:
+      subject: "service:billing-api"
+      predicate: deployed_version
+      value: "2.15.0"
+      text: "billing-api is running 2.15.0"
+      relayed_user_statement: { quote: "we're on 2.15 now" }
+    expect:
+      status: proposed
+      trust: 0.30
+      hints: ["relayed_user_statement doesn't count: the user has no authority over deployed_version, so this is the agent's claim, not the user's"]
+
+  # And only about the user the agent serves: the user's word settles their own preferences.
+  - as: assistant
+    remember:
+      subject: "user:u_99"
+      predicate: dietary_preference
+      value: vegan
+      text: "user u_99 is vegan"
+      relayed_user_statement: { quote: "my colleague is vegan" }
+    expect:
+      status: proposed
+      trust: 0.30
+      hints: ["relayed_user_statement doesn't count: the claim is about user:u_99, and agent:assistant relays only for user:local, so this is the agent's claim, not the user's"]
+
+  - as: assistant
+    remember:
+      subject: "user:local"
+      predicate: timezone
+      value: "Asia/Kolkata"
+      text: "the user is in the Asia/Kolkata timezone"
+      relayed_user_statement: { quote: "  " }
+    expect: { error: { code: invalid_claim, message: "claims[0].relayed_user_statement.quote: give the user's exact words, not an empty quote; nothing was remembered" } }
+
+  # A relayed preference is a statement about the user...
+  - as: assistant
+    remember:
+      subject: "user:local"
+      predicate: prefers
+      value: "British English"
+      text: "the user prefers replies in British English"
+      relayed_user_statement: { quote: "Always reply to me in British English" }
+    expect: { status: verified, trust: 0.80, hints: [] }
+
+  # ...because a relayed instruction is still an agent's, and agents can't instruct agents.
+  - as: assistant
+    remember:
+      subject: "user:local"
+      predicate: prefers
+      value: "British English"
+      text: "Always reply to the user in British English"
+      relayed_user_statement: { quote: "Always reply to me in British English" }
+    expect:
+      status: quarantined
+      trust: 0.30
+      hints:
+        - "to relay what the user prefers, write it as a statement about them, such as \"the user prefers …\""
+        - "quarantined: the text reads as an instruction to an agent (\"always …\", \"never …\"), and only a claim the user states directly can instruct agents; it isn't served as memory, and only an operator can release it"
+
+  - as: remote
+    remember:
+      subject: "user:local"
+      predicate: prefers
+      value: "British English"
+      text: "Always reply to the user in British English"
+      relayed_user_statement: { quote: "Always reply to me in British English" }
+    expect:
+      status: quarantined
+      hints:
+        - "relayed_user_statement doesn't count: agent:remote lacks the relay_user permission, so this is the agent's claim, not the user's"
+        - "quarantined: the text reads as an instruction to an agent (\"always …\", \"never …\"), and only a claim the user states directly can instruct agents; it isn't served as memory, and only an operator can release it"
+
+  - as: assistant
+    recall: { query: "vegetarian" }
+    expect:
+      answer_set:
+        - { predicate: dietary_preference, value: vegetarian, status: verified, trust: 0.80 }
+
+  - as: assistant
+    journal: { scope: "user:local" }
+    expect:
+      - content:
+          predicate: dietary_preference
+          status: verified
+          source: { kind: agent_claim, actor: "agent:assistant", channel: agent }
+          evidence:
+            - { kind: relayed_user_statement, quote: "I'm vegetarian", observed_at: "2026-11-01T09:00:00Z" }
+      - content: { predicate: dietary_preference, value: vegan, status: proposed }
+      - content: { predicate: deployed_version, status: proposed }
+      - content: { subject: "user:u_99", predicate: dietary_preference, status: proposed }
+      - content: { predicate: prefers, status: verified, evidence: [ { kind: relayed_user_statement } ] }
+      - content: { predicate: prefers, status: quarantined }
+      - content: { predicate: prefers, status: quarantined }

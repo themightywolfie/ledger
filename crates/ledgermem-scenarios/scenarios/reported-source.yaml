@@ -1,0 +1,69 @@
+name: a reported source can only lower a claim's source kind, never raise it
+clock: 2026-11-01T09:00:00Z
+policy: { version: 1, extends: [software-delivery] }
+callers:
+  coder: { kind: agent, project: billing-api }
+  adapter: { kind: integration, project: billing-api }
+  operator: { kind: operator, permissions: [read, propose] }
+steps:
+  - as: coder
+    remember:
+      subject: "service:billing-api"
+      predicate: deployed_version
+      value: "2.15.0"
+      text: "billing-api 2.15.0 is out, according to its release notes page"
+      reported_source: web
+    expect: { status: proposed, trust: 0.15, hints: [] }
+
+  - as: coder
+    remember:
+      subject: "service:billing-api"
+      predicate: owner
+      value: "team:payments"
+      text: "the runbook says billing-api is owned by the payments team"
+      reported_source: document
+    expect: { status: proposed, trust: 0.30, hints: [] }
+
+  - as: coder
+    remember:
+      subject: "service:billing-api"
+      predicate: migration_status
+      value: applied
+      text: "the deploy agent reports the billing-api migration is applied"
+      reported_source: other_agent
+    expect: { status: proposed, trust: 0.25, hints: [] }
+
+  # A document is no more trusted than another agent, so the declared kind stands.
+  - as: adapter
+    remember:
+      subject: "service:billing-api"
+      predicate: ci_status
+      value: failing
+      text: "the review agent reports billing-api's CI is failing"
+      source: { kind: other_agent }
+      reported_source: document
+    expect: { status: proposed, trust: 0.25, hints: [] }
+
+  # A person passing on what a web page says is passing on the web.
+  - as: operator
+    remember:
+      subject: "service:billing-api"
+      predicate: uses_dependency
+      value: "stripe"
+      text: "a blog post says billing-api uses stripe"
+      reported_source: web
+    expect: { status: proposed, trust: 0.15, hints: [] }
+
+  - as: coder
+    journal: { scope: "project:billing-api" }
+    expect:
+      - content: { predicate: deployed_version, source: { kind: web, channel: agent } }
+      - content: { predicate: owner, source: { kind: document, channel: agent } }
+      - content: { predicate: migration_status, source: { kind: other_agent, channel: agent } }
+      - content: { predicate: ci_status, source: { kind: other_agent, channel: integration } }
+
+  - as: operator
+    journal: { scope: org }
+    expect:
+      - kind: policy_applied
+      - content: { predicate: uses_dependency, source: { kind: web, actor: "operator:operator", channel: cli } }

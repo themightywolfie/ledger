@@ -19,6 +19,7 @@ pub trait Store: Send + Sync {
 
     /// Full-text search over claim text and subject within the given scopes, best match first.
     /// Equally good matches come in claim id order, so results don't depend on storage order.
+    /// Quarantined claims are never served as memory, so search never returns one.
     fn search(
         &self,
         tenant: &str,

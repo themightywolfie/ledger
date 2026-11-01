@@ -86,6 +86,18 @@ impl Caller {
         }
     }
 
+    /// A framework integration acting on the integration channel, with no permissions yet. With
+    /// declare_source it says where each claim came from.
+    pub fn integration(tenant: &str, integration: &str) -> Self {
+        Caller {
+            tenant: tenant.to_owned(),
+            actor: format!("integration:{integration}"),
+            channel: Channel::Integration,
+            permissions: BTreeSet::new(),
+            bounds: ScopeBounds::default(),
+        }
+    }
+
     /// A person looking after the tenant's memory, acting through `channel`, with no permissions
     /// yet. Operator operations such as verifying journals span every scope in the tenant.
     pub fn operator(tenant: &str, operator: &str, channel: Channel) -> Self {

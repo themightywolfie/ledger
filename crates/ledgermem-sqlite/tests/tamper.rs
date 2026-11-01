@@ -24,12 +24,12 @@ async fn ledger_with_three_entries(path: &Path) -> Ledger {
         .with_project("billing-api")
         .with_permissions([Permission::Propose]);
     for version in ["2.13.2", "2.14.0", "2.15.0"] {
-        let claim = ClaimInput {
-            subject: "service:billing-api".into(),
-            predicate: "deployed_version".into(),
-            value: json!(version),
-            text: format!("billing-api is running {version} in production"),
-        };
+        let claim = ClaimInput::new(
+            "service:billing-api",
+            "deployed_version",
+            json!(version),
+            format!("billing-api is running {version} in production"),
+        );
         let remember = Remember {
             claims: vec![claim],
         };

@@ -7,9 +7,10 @@ use serde_json::Value;
 use time::Duration;
 
 use crate::caller::{Caller, Permission};
-use crate::claim::{Claim, ClaimId, Scope, ScopeLevel, Source, SourceKind, Status};
+use crate::claim::{Claim, ClaimId, Evidence, Scope, ScopeLevel, Source};
 use crate::clock::Clock;
 use crate::error::{Error, Result};
+use crate::gate;
 use crate::journal::{self, EntryKind, JournalEntry, NewEntry, StoredEntry};
 use crate::ops::{
     ApplyPolicy, BrokenLink, ChainReport, ClaimResult, JournalQuery, PolicyApplied, PolicyQuery,
@@ -54,28 +55,26 @@ impl Ledger {
 
     /// Proposes claims. Each one is appended to its scope's journal before any read can see it.
     /// Subjects are resolved through the policy's aliases and values checked against their
-    /// predicates' declared types. If any claim fails a check, none is remembered.
+    /// predicates' declared types. Each claim's source kind comes from the caller's channel and
+    /// key, and the request can only lower it. If any claim fails a check, none is remembered.
     pub async fn remember(&self, caller: &Caller, req: Remember) -> Result<RememberOutcome> {
         caller.require(Permission::Propose)?;
         let now = self.clock.now();
         let scope = caller.default_write_scope();
         let policy = self.policy_in(&caller.tenant, caller.bounds.project.as_deref())?;
-        let source = Source {
-            kind: SourceKind::for_channel(caller.channel),
-            actor: caller.actor.clone(),
-            channel: caller.channel,
-        };
 
         let mut commit = Commit::default();
         let mut results = Vec::with_capacity(req.claims.len());
         for (index, input) in req.claims.into_iter().enumerate() {
+            let invalid = |(field, reason)| {
+                Error::InvalidClaim(format!(
+                    "claims[{index}].{field}: {reason}; nothing was remembered"
+                ))
+            };
             let admitted = policy
-                .admit(&input.subject, &input.predicate, input.value)
-                .map_err(|(field, reason)| {
-                    Error::InvalidClaim(format!(
-                        "claims[{index}].{field}: {reason}; nothing was remembered"
-                    ))
-                })?;
+                .admit(&input.subject, &input.predicate, input.value.clone())
+                .map_err(invalid)?;
+            let classified = gate::classify(caller, &input, &admitted, &policy).map_err(invalid)?;
             let claim = Claim {
                 id: ClaimId::generate(now),
                 scope: scope.clone(),
@@ -83,8 +82,17 @@ impl Ledger {
                 predicate: input.predicate,
                 value: admitted.value,
                 text: input.text,
-                source: source.clone(),
-                status: Status::Proposed,
+                source: Source {
+                    kind: classified.kind,
+                    actor: caller.actor.clone(),
+                    channel: caller.channel,
+                },
+                evidence: classified
+                    .evidence
+                    .into_iter()
+                    .map(|kind| Evidence::observed(kind, now))
+                    .collect(),
+                status: classified.status,
                 valid_from: now,
                 valid_to: None,
                 recorded_at: now,
@@ -92,8 +100,8 @@ impl Ledger {
             results.push(ClaimResult {
                 claim_id: claim.id.clone(),
                 status: claim.status,
-                trust: claim.source.kind.prior(),
-                hints: admitted.hints,
+                trust: claim.trust(),
+                hints: admitted.hints.into_iter().chain(classified.hints).collect(),
             });
             let entry = NewEntry {
                 id: NewEntry::generate_id(now),
@@ -126,7 +134,7 @@ impl Ledger {
         let answer_set = claims
             .into_iter()
             .map(|claim| RecalledClaim {
-                trust: claim.source.kind.prior(),
+                trust: claim.trust(),
                 age: format_age(now - claim.recorded_at),
                 claim_id: claim.id,
                 scope: claim.scope,

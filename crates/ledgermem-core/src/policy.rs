@@ -785,7 +785,7 @@ fn same_number(a: &Number, b: &Number) -> bool {
 
 /// Text as it is compared: NFKC-normalised, case-folded, trimmed, and with each run of
 /// whitespace one space.
-fn folded(text: &str) -> String {
+pub(crate) fn folded(text: &str) -> String {
     let normalised: String = text.nfkc().collect();
     let folded = caseless::default_case_fold_str(&normalised);
     folded.split_whitespace().collect::<Vec<_>>().join(" ")
