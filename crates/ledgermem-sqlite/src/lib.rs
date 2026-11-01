@@ -5,10 +5,11 @@
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ledgermem_core::{
-    Claim, Commit, JournalHead, Projection, Scope, Store, StoreError, StoredEntry, genesis_hash,
+    Claim, Commit, JournalHead, Projection, Scope, Store, StoreError, StoredEntry, StoredJournal,
+    genesis_hash,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::Value;
@@ -65,10 +66,9 @@ impl SqliteStore {
     /// Opens or creates the database file at `path`.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         let conn = Connection::open(path).map_err(StoreError::new)?;
-        conn.pragma_update(None, "journal_mode", "wal")
-            .map_err(StoreError::new)?;
-        // Other processes may hold the write lock: several agents can share one database.
+        // Other processes may hold a lock: several agents can share one database.
         conn.busy_timeout(BUSY_TIMEOUT).map_err(StoreError::new)?;
+        use_wal(&conn)?;
         Self::init(conn)
     }
 
@@ -77,31 +77,37 @@ impl SqliteStore {
         Self::init(Connection::open_in_memory().map_err(StoreError::new)?)
     }
 
-    fn init(conn: Connection) -> Result<Self, StoreError> {
+    fn init(mut conn: Connection) -> Result<Self, StoreError> {
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(StoreError::new)?;
-        let version: i64 = conn
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .map_err(StoreError::new)?;
-        match version {
-            SCHEMA_VERSION => {}
-            0 if has_journal(&conn)? => {
-                return Err(StoreError::new(
-                    "this database was made by a pre-release build of ledgermem whose journals \
-                     have no hash chains; move it aside, and ledgermem will create a new one",
-                ));
+        if schema_version(&conn)? != SCHEMA_VERSION {
+            // Decide and create under the write lock, so a process opening the same new
+            // database at the same moment waits for the whole schema instead of seeing part.
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(StoreError::new)?;
+            match schema_version(&tx)? {
+                SCHEMA_VERSION => {}
+                0 if has_journal(&tx)? => {
+                    return Err(StoreError::new(
+                        "this database was made by a pre-release build of ledgermem whose \
+                         journals have no hash chains; move it aside, and ledgermem will create \
+                         a new one",
+                    ));
+                }
+                0 => {
+                    tx.execute_batch(SCHEMA).map_err(StoreError::new)?;
+                    tx.pragma_update(None, "user_version", SCHEMA_VERSION)
+                        .map_err(StoreError::new)?;
+                }
+                newer => {
+                    return Err(StoreError::new(format!(
+                        "this database uses schema version {newer}, newer than this ledgermem \
+                         understands ({SCHEMA_VERSION}); upgrade ledgermem to open it"
+                    )));
+                }
             }
-            0 => {
-                conn.execute_batch(SCHEMA).map_err(StoreError::new)?;
-                conn.pragma_update(None, "user_version", SCHEMA_VERSION)
-                    .map_err(StoreError::new)?;
-            }
-            newer => {
-                return Err(StoreError::new(format!(
-                    "this database uses schema version {newer}, newer than this ledgermem \
-                     understands ({SCHEMA_VERSION}); upgrade ledgermem to open it"
-                )));
-            }
+            tx.commit().map_err(StoreError::new)?;
         }
         Ok(SqliteStore {
             conn: Mutex::new(conn),
@@ -221,43 +227,39 @@ impl Store for SqliteStore {
     fn journal(&self, tenant: &str, scope: &str) -> Result<Vec<StoredEntry>, StoreError> {
         let conn = self.conn()?;
         let mut statement = conn
-            .prepare(
-                "SELECT id, seq, kind, actor, channel, recorded_at, content,
-                        content_hash, prev_hash, entry_hash
-                 FROM entries WHERE tenant = ?1 AND scope = ?2 ORDER BY seq",
-            )
+            .prepare(&format!(
+                "SELECT {ENTRY_COLUMNS} FROM entries WHERE tenant = ?1 AND scope = ?2 ORDER BY seq"
+            ))
             .map_err(StoreError::new)?;
         let rows = statement
-            .query_map(params![tenant, scope], |row| {
-                Ok(StoredEntry {
-                    id: row.get(0)?,
-                    scope: scope.to_owned(),
-                    // A negative number can only be tampering; verification reports it as a
-                    // missing entry.
-                    seq: u64::try_from(row.get::<_, i64>(1)?).unwrap_or(0),
-                    kind: row.get(2)?,
-                    actor: row.get(3)?,
-                    channel: row.get(4)?,
-                    recorded_at: row.get(5)?,
-                    content: row.get(6)?,
-                    content_hash: row.get(7)?,
-                    prev_hash: row.get(8)?,
-                    entry_hash: row.get(9)?,
-                })
-            })
+            .query_map(params![tenant, scope], stored_entry)
             .map_err(StoreError::new)?;
         rows.map(|entry| entry.map_err(StoreError::new)).collect()
     }
 
-    fn scopes(&self, tenant: &str) -> Result<Vec<String>, StoreError> {
+    fn journals(&self, tenant: &str) -> Result<Vec<StoredJournal>, StoreError> {
         let conn = self.conn()?;
+        // One statement reads one snapshot, so no write lands between journals.
         let mut statement = conn
-            .prepare("SELECT DISTINCT scope FROM entries WHERE tenant = ?1 ORDER BY scope")
+            .prepare(&format!(
+                "SELECT {ENTRY_COLUMNS} FROM entries WHERE tenant = ?1 ORDER BY scope, seq"
+            ))
             .map_err(StoreError::new)?;
         let rows = statement
-            .query_map([tenant], |row| row.get(0))
+            .query_map([tenant], stored_entry)
             .map_err(StoreError::new)?;
-        rows.map(|scope| scope.map_err(StoreError::new)).collect()
+        let mut journals: Vec<StoredJournal> = Vec::new();
+        for entry in rows {
+            let entry = entry.map_err(StoreError::new)?;
+            match journals.last_mut() {
+                Some(journal) if journal.scope == entry.scope => journal.entries.push(entry),
+                _ => journals.push(StoredJournal {
+                    scope: entry.scope.clone(),
+                    entries: vec![entry],
+                }),
+            }
+        }
+        Ok(journals)
     }
 
     fn replace_projections(
@@ -289,6 +291,28 @@ impl Store for SqliteStore {
     }
 }
 
+/// The columns [`stored_entry`] reads, in its order.
+const ENTRY_COLUMNS: &str = "scope, id, seq, kind, actor, channel, recorded_at, content,
+                             content_hash, prev_hash, entry_hash";
+
+/// One `entries` row, selected as [`ENTRY_COLUMNS`], exactly as stored.
+fn stored_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredEntry> {
+    Ok(StoredEntry {
+        scope: row.get(0)?,
+        id: row.get(1)?,
+        // A negative number can only be tampering; verification reports it as a missing entry.
+        seq: u64::try_from(row.get::<_, i64>(2)?).unwrap_or(0),
+        kind: row.get(3)?,
+        actor: row.get(4)?,
+        channel: row.get(5)?,
+        recorded_at: row.get(6)?,
+        content: row.get(7)?,
+        content_hash: row.get(8)?,
+        prev_hash: row.get(9)?,
+        entry_hash: row.get(10)?,
+    })
+}
+
 /// Where each of the tenant's journals ends now, in scope order.
 fn journal_heads(tx: &Transaction<'_>, tenant: &str) -> Result<Vec<JournalHead>, StoreError> {
     let mut statement = tx
@@ -305,6 +329,31 @@ fn journal_heads(tx: &Transaction<'_>, tenant: &str) -> Result<Vec<JournalHead>,
         })
         .map_err(StoreError::new)?;
     rows.map(|head| head.map_err(StoreError::new)).collect()
+}
+
+/// Switches the database to WAL. SQLite doesn't wait on the busy timeout while it changes
+/// journal mode, so when several processes open the same new database at once, the ones that
+/// lose retry until the timeout instead of failing.
+fn use_wal(conn: &Connection) -> Result<(), StoreError> {
+    let deadline = Instant::now() + BUSY_TIMEOUT;
+    loop {
+        match conn.pragma_update(None, "journal_mode", "wal") {
+            Ok(()) => return Ok(()),
+            Err(rusqlite::Error::SqliteFailure(failure, _))
+                if failure.code == rusqlite::ErrorCode::DatabaseBusy
+                    && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => return Err(StoreError::new(error)),
+        }
+    }
+}
+
+/// The schema version stamped in the database: 0 when none was ever set.
+fn schema_version(conn: &Connection) -> Result<i64, StoreError> {
+    conn.pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(StoreError::new)
 }
 
 /// Whether the database already has a journal table, however old.

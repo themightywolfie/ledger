@@ -292,4 +292,6 @@ Because the chain commits to `content_hash` rather than the content, **forget** 
 
 Reindex and restore refuse a journal that doesn't verify, and change nothing.
 
+**What verification can't see on its own.** A chain proves that a journal's history is intact up to its head. It can't show that entries were cut off the end, or that the whole tail from some entry onward was replaced by a forgery with every hash recomputed, because the shorter or forged chain is consistent with itself. Catching either needs a head recorded outside the database: the head hashes a backup's manifest records, or one an operator keeps elsewhere. `ledgermem verify` prints each journal's entry count and head hash so they can be compared against such a record.
+
 **Forget register.** Each instance keeps the ids and content hashes of everything ever forgotten, outside any tenant's data, so it survives a tenant being emptied. Restore re-applies matching forgets after replay and reports how many were re-applied. A backup restored onto a different machine cannot know about forgets made after the backup was taken. The CLI warns about this, and the documentation states it.

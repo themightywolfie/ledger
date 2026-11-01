@@ -192,12 +192,6 @@ impl Ledger {
                 broken.seq, broken.problem
             )));
         }
-        let mut projections = Vec::new();
-        for stored in journals.iter().flat_map(|journal| &journal.entries) {
-            let entry = readable(stored.clone())?;
-            projections.extend(projections_for(entry.kind, &entry.content)?);
-        }
-        let claims = distinct_claims(&projections);
         let heads: Vec<_> = journals
             .iter()
             .map(|journal| JournalHead {
@@ -205,6 +199,15 @@ impl Ledger {
                 seq: journal.entries.len() as u64,
             })
             .collect();
+        // Replay journal by journal. Every entry about a claim lives in its scope's journal,
+        // because conflicts and supersession stay within one scope (ADR-0005), so replaying
+        // each journal in order rebuilds every claim as live writes left it.
+        let mut projections = Vec::new();
+        for stored in journals.into_iter().flat_map(|journal| journal.entries) {
+            let entry = readable(stored)?;
+            projections.extend(projections_for(entry.kind, &entry.content)?);
+        }
+        let claims = distinct_claims(&projections);
         if !self
             .store
             .replace_projections(tenant, &heads, projections)?
@@ -212,26 +215,25 @@ impl Ledger {
             return Ok(None);
         }
         Ok(Some(ReindexReport {
-            scopes: journals.len() as u64,
+            scopes: heads.len() as u64,
             entries: heads.iter().map(|head| head.seq).sum(),
             claims,
         }))
     }
 
-    /// Every journal in the tenant as stored, each with its first broken link, if any.
+    /// Every journal in the tenant as stored, read as one snapshot, each with its first broken
+    /// link, if any.
     fn read_journals(&self, tenant: &str) -> Result<Vec<Journal>> {
-        self.store
-            .scopes(tenant)?
+        Ok(self
+            .store
+            .journals(tenant)?
             .into_iter()
-            .map(|scope| {
-                let entries = self.store.journal(tenant, &scope)?;
-                Ok(Journal {
-                    broken_at: journal::verify_chain(&scope, &entries),
-                    scope,
-                    entries,
-                })
+            .map(|stored| Journal {
+                broken_at: journal::verify_chain(&stored.scope, &stored.entries),
+                scope: stored.scope,
+                entries: stored.entries,
             })
-            .collect()
+            .collect())
     }
 }
 

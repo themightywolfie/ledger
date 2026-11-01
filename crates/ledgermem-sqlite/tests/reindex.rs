@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use ledgermem_core::{
     Caller, Channel, Claim, ClaimInput, Commit, EntryKind, JournalHead, JournalQuery, Ledger,
     NewEntry, Permission, Projection, Recall, ReindexReport, Remember, Scope, ScopeLevel, Store,
-    StoreError, StoredEntry, TestClock,
+    StoreError, StoredEntry, StoredJournal, TestClock,
 };
 use ledgermem_sqlite::SqliteStore;
 use serde_json::{Value, json};
@@ -176,8 +176,8 @@ impl Store for InterruptedStore {
     fn journal(&self, tenant: &str, scope: &str) -> Result<Vec<StoredEntry>, StoreError> {
         self.inner.journal(tenant, scope)
     }
-    fn scopes(&self, tenant: &str) -> Result<Vec<String>, StoreError> {
-        self.inner.scopes(tenant)
+    fn journals(&self, tenant: &str) -> Result<Vec<StoredJournal>, StoreError> {
+        self.inner.journals(tenant)
     }
     fn replace_projections(
         &self,

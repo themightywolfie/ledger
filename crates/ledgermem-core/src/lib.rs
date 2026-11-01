@@ -22,4 +22,4 @@ pub use ops::{
     BrokenLink, ChainProblem, ChainReport, ClaimInput, ClaimResult, JournalQuery, ReadIntent,
     ReadPack, Recall, RecalledClaim, ReindexReport, Remember, RememberOutcome, ScopeVerification,
 };
-pub use store::{Commit, JournalHead, Projection, Store, StoreError};
+pub use store::{Commit, JournalHead, Projection, Store, StoreError, StoredJournal};

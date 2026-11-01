@@ -30,8 +30,9 @@ pub trait Store: Send + Sync {
     /// written `level:id` or `org`.
     fn journal(&self, tenant: &str, scope: &str) -> Result<Vec<StoredEntry>, StoreError>;
 
-    /// Every scope in the tenant that has a journal, as stored, in order.
-    fn scopes(&self, tenant: &str) -> Result<Vec<String>, StoreError>;
+    /// Every journal in the tenant, entries exactly as stored, read as one snapshot so that no
+    /// write lands between one journal and the next. Journals come in scope order.
+    fn journals(&self, tenant: &str) -> Result<Vec<StoredJournal>, StoreError>;
 
     /// Drops every projection in the tenant and applies `projections` in order, but only if the
     /// tenant's journals still end where `heads` says they did when they were read. Returns false,
@@ -43,6 +44,14 @@ pub trait Store: Send + Sync {
         heads: &[JournalHead],
         projections: Vec<Projection>,
     ) -> Result<bool, StoreError>;
+}
+
+/// One scope's journal, entries exactly as stored, in sequence order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredJournal {
+    /// The scope as stored, written `level:id` or `org`.
+    pub scope: String,
+    pub entries: Vec<StoredEntry>,
 }
 
 /// Where one scope's journal ended when it was read.

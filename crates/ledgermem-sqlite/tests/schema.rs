@@ -52,3 +52,30 @@ fn a_database_reopens_after_it_was_created() {
 
     SqliteStore::open(&path).expect("a database this build created reopens");
 }
+
+#[test]
+fn processes_opening_a_new_database_at_the_same_moment_all_succeed() {
+    const OPENERS: usize = 8;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ledgermem.db");
+    let start = std::sync::Barrier::new(OPENERS);
+
+    let failures: Vec<String> = std::thread::scope(|threads| {
+        let handles: Vec<_> = (0..OPENERS)
+            .map(|_| {
+                threads.spawn(|| {
+                    start.wait();
+                    SqliteStore::open(&path)
+                        .err()
+                        .map(|error| error.to_string())
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .filter_map(|handle| handle.join().unwrap())
+            .collect()
+    });
+
+    assert!(failures.is_empty(), "opens failed: {failures:?}");
+}
