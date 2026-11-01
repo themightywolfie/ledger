@@ -345,8 +345,8 @@ Validation errors name the offending path (`predicates.test_status.value_type`) 
 **Layering.** A document starts from the packs it extends, in order, and its own declarations replace theirs. A project overlay is layered the same way over the tenant policy:
 
 - A predicate declared again replaces the earlier declaration whole, so an overlay that changes one field restates the others it wants kept.
-- An alias declared again moves to the subject the later layer names. An overlay may make a tenant subject an alias, and the tenant's aliases of that subject follow it.
-- `resolution`, `trust` and `freshness` settings replace the earlier layer's one field at a time. A setting no layer sets takes its default.
+- `resolution`, `trust` and `freshness` replace the earlier layer's one field at a time. A field no layer sets takes its default.
+- Aliases are tenant-wide, so every scope resolves a subject the same way and a project claim can shadow an org claim about the same subject (ADR-0005). An overlay that declares `subjects` is rejected.
 
 Applying a version journals it, with the packs it extends as they were at that moment, in the org journal for the tenant policy or in the project's journal for an overlay. The new version replaces the previous one in that scope. `ledgermem policy show` prints the policy in effect, with every default filled in, and `--project` adds that project's overlay. Agents read the same thing, and only operators can apply a version, so no agent can declare an alias.
 

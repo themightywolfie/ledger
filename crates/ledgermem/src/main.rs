@@ -12,6 +12,7 @@ use ledgermem_core::{
 };
 use ledgermem_server::mcp::{StdioLaunch, serve_stdio};
 use ledgermem_sqlite::SqliteStore;
+use serde::Serialize;
 
 type BoxError = Box<dyn Error + Send + Sync>;
 
@@ -146,11 +147,9 @@ async fn mcp(args: McpArgs) -> Result<(), BoxError> {
 async fn verify(args: OperatorArgs) -> Result<ExitCode, BoxError> {
     let (ledger, operator) = open_as_operator(&args).await?;
     let report = ledger.verify_journals(&operator).await?;
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        print_chain_report(&args.tenant, &report);
-    }
+    print(args.json, &report, |report| {
+        print_chain_report(&args.tenant, report);
+    })?;
     Ok(if report.ok {
         ExitCode::SUCCESS
     } else {
@@ -161,11 +160,9 @@ async fn verify(args: OperatorArgs) -> Result<ExitCode, BoxError> {
 async fn reindex(args: OperatorArgs) -> Result<ExitCode, BoxError> {
     let (ledger, operator) = open_as_operator(&args).await?;
     let report = ledger.reindex(&operator).await?;
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        print_reindex_report(&args.tenant, &report);
-    }
+    print(args.json, &report, |report| {
+        print_reindex_report(&args.tenant, report);
+    })?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -180,37 +177,41 @@ async fn apply_policy(
     let applied = ledger
         .apply_policy(&operator, ApplyPolicy { document, project })
         .await?;
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&applied)?);
-    } else {
-        print_policy_applied(&applied);
-    }
+    print(args.json, &applied, print_policy_applied)?;
     Ok(ExitCode::SUCCESS)
 }
 
 async fn show_policy(project: Option<String>, args: OperatorArgs) -> Result<ExitCode, BoxError> {
     let (ledger, operator) = open_as_operator(&args).await?;
     let policy = ledger.policy(&operator, PolicyQuery { project }).await?;
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&policy)?);
-    } else {
-        print!("{}", serde_yaml::to_string(&policy)?);
-    }
+    print(args.json, &policy, |policy| {
+        print!(
+            "{}",
+            serde_yaml::to_string(policy).expect("a policy serializes as YAML")
+        );
+    })?;
     Ok(ExitCode::SUCCESS)
 }
 
 fn list_packs(json: bool) -> Result<ExitCode, BoxError> {
-    let packs = PredicatePack::all();
-    if json {
-        println!("{}", serde_json::to_string_pretty(&packs)?);
-        return Ok(ExitCode::SUCCESS);
-    }
-    let width = packs.iter().map(|pack| pack.name.len()).max().unwrap_or(0);
-    for pack in &packs {
-        let predicates: Vec<_> = pack.predicates.keys().map(String::as_str).collect();
-        println!("{:width$}  {}", pack.name, predicates.join(", "));
-    }
+    print(json, &PredicatePack::all(), |packs| {
+        let width = packs.iter().map(|pack| pack.name.len()).max().unwrap_or(0);
+        for pack in packs {
+            let predicates: Vec<_> = pack.predicates.keys().map(String::as_str).collect();
+            println!("{:width$}  {}", pack.name, predicates.join(", "));
+        }
+    })?;
     Ok(ExitCode::SUCCESS)
+}
+
+/// Prints a command's outcome: as JSON with `--json`, and otherwise as `text` writes it.
+fn print<T: Serialize>(json: bool, outcome: &T, text: impl FnOnce(&T)) -> Result<(), BoxError> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(outcome)?);
+    } else {
+        text(outcome);
+    }
+    Ok(())
 }
 
 /// The ledger behind `args`, and the local operator who runs commands on it.

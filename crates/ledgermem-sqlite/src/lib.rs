@@ -243,17 +243,30 @@ impl Store for SqliteStore {
             .collect()
     }
 
-    fn policy(&self, tenant: &str, scope: &Scope) -> Result<Option<PolicyVersion>, StoreError> {
-        let body: Option<String> = self
-            .conn()?
-            .query_row(
-                "SELECT body FROM policies WHERE tenant = ?1 AND scope = ?2",
-                params![tenant, scope.to_string()],
-                |row| row.get(0),
+    fn policies(&self, tenant: &str, scopes: &[Scope]) -> Result<Vec<PolicyVersion>, StoreError> {
+        let scopes: Vec<String> = scopes.iter().map(Scope::to_string).collect();
+        let conn = self.conn()?;
+        // One statement reads one snapshot, so no apply lands between scopes.
+        let mut statement = conn
+            .prepare(
+                "SELECT scope, body FROM policies
+                 WHERE tenant = ?1 AND scope IN (SELECT value FROM json_each(?2))",
             )
-            .optional()
             .map_err(StoreError::new)?;
-        body.map(|body| from_json(&body)).transpose()
+        let rows = statement
+            .query_map(
+                params![tenant, Value::from(scopes.clone()).to_string()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map_err(StoreError::new)?;
+        let mut versions = Vec::new();
+        for row in rows {
+            let (scope, body) = row.map_err(StoreError::new)?;
+            let order = scopes.iter().position(|wanted| *wanted == scope);
+            versions.push((order, from_json::<PolicyVersion>(&body)?));
+        }
+        versions.sort_by_key(|(order, _)| *order);
+        Ok(versions.into_iter().map(|(_, version)| version).collect())
     }
 
     fn journal(&self, tenant: &str, scope: &str) -> Result<Vec<StoredEntry>, StoreError> {

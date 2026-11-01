@@ -1,22 +1,23 @@
 //! The policy: the predicates a tenant declares, the aliases of its subjects and its resolution
-//! settings (contracts.md, section 5).
+//! policy (contracts.md, section 5).
 //!
 //! An operator applies a policy document to the tenant, or to one project as an overlay on the
 //! tenant's. Each applied document is a policy version, journaled together with the predicate
 //! packs it extends as they were when it was applied, so replaying the journal rebuilds the same
-//! policy even after a later build changes a pack.
+//! policy even after a later build changes a pack. Aliases are tenant-wide, so every scope
+//! resolves a subject the same way.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{Map, Number, Value};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use unicode_normalization::UnicodeNormalization;
 
-use crate::claim::Scope;
+use crate::claim::{Scope, ScopeLevel};
 use crate::error::{Error, Result};
 
 /// The document format version this build reads.
@@ -55,11 +56,11 @@ pub struct PolicyDocument {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub predicates: BTreeMap<String, Predicate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resolution: Option<ResolutionSettings>,
+    pub resolution: Option<ResolutionPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trust: Option<TrustSettings>,
+    pub trust: Option<TrustPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub freshness: Option<FreshnessSettings>,
+    pub freshness: Option<FreshnessIntervals>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -162,7 +163,7 @@ pub enum Authority {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ResolutionSettings {
+pub struct ResolutionPolicy {
     /// How far apart two trust scores must be for the higher to win.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trust_margin: Option<f64>,
@@ -181,7 +182,7 @@ pub enum OnUnresolved {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct TrustSettings {
+pub struct TrustPolicy {
     /// The score at or above which a claim is trusted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trusted_threshold: Option<f64>,
@@ -190,7 +191,7 @@ pub struct TrustSettings {
 /// The re-verification interval of each freshness class that has one.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct FreshnessSettings {
+pub struct FreshnessIntervals {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slow: Option<Interval>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -216,7 +217,7 @@ pub struct PolicyVersion {
 }
 
 /// The policy in effect: the tenant policy, with a project's overlay on top when there is one.
-/// Settings no version sets take their defaults.
+/// Anything no version sets takes its default.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Policy {
     /// The policy versions in effect, the tenant's first.
@@ -225,9 +226,9 @@ pub struct Policy {
     pub packs: Vec<String>,
     pub subjects: Subjects,
     pub predicates: BTreeMap<String, Predicate>,
-    pub resolution: ResolutionSettings,
-    pub trust: TrustSettings,
-    pub freshness: FreshnessSettings,
+    pub resolution: ResolutionPolicy,
+    pub trust: TrustPolicy,
+    pub freshness: FreshnessIntervals,
     /// Each alias, and the subject it names.
     #[serde(skip)]
     subject_of: BTreeMap<String, String>,
@@ -238,6 +239,13 @@ pub struct Policy {
 pub struct AppliedVersion {
     pub id: String,
     pub scope: Scope,
+}
+
+/// A claim's subject and value as Ledger keeps them, and advice for whoever wrote it.
+pub(crate) struct Admitted {
+    pub subject: String,
+    pub value: Value,
+    pub hints: Vec<String>,
 }
 
 /// A predicate pack this build ships.
@@ -291,7 +299,7 @@ impl PolicyDocument {
         for (name, predicate) in &self.predicates {
             predicate.validate(name)?;
         }
-        let shares = [
+        let fractions = [
             (
                 "resolution.trust_margin",
                 self.resolution.as_ref().and_then(|r| r.trust_margin),
@@ -301,8 +309,8 @@ impl PolicyDocument {
                 self.trust.as_ref().and_then(|t| t.trusted_threshold),
             ),
         ];
-        for (path, share) in shares {
-            if share.is_some_and(|share| !(0.0..=1.0).contains(&share)) {
+        for (path, fraction) in fractions {
+            if fraction.is_some_and(|fraction| !(0.0..=1.0).contains(&fraction)) {
                 return Err(invalid_policy(path, "must be between 0 and 1"));
             }
         }
@@ -397,6 +405,20 @@ impl Serialize for ValueType {
 }
 
 impl ValueType {
+    /// Whether `value` is a value of this type.
+    fn admits(&self, value: &Value) -> bool {
+        match self {
+            ValueType::Text | ValueType::Version => value.is_string(),
+            ValueType::Number => value.is_number(),
+            ValueType::Boolean => value.is_boolean(),
+            ValueType::Datetime => instant(value).is_some(),
+            ValueType::Subject => named_subject(value).is_some_and(is_subject),
+            ValueType::Enum(members) => value
+                .as_str()
+                .is_some_and(|value| members.iter().any(|member| member == value)),
+        }
+    }
+
     /// What a value of this type is, for an error message.
     fn describe(&self) -> String {
         match self {
@@ -466,6 +488,13 @@ impl PolicyVersion {
     /// Parses and validates `text` as a policy document applied to `scope` at `at`.
     pub(crate) fn new(scope: Scope, text: &str, at: OffsetDateTime) -> Result<Self> {
         let document = PolicyDocument::from_yaml(text)?;
+        if scope.level != ScopeLevel::Org && !document.subjects.is_empty() {
+            return Err(invalid_policy(
+                "subjects",
+                "aliases are tenant-wide, so a project overlay can't declare them; declare them \
+                 in the tenant policy",
+            ));
+        }
         Ok(PolicyVersion {
             id: format!("pol_{}", ulid::Ulid::from_datetime(at.into())),
             scope,
@@ -482,14 +511,14 @@ impl Default for Policy {
             packs: Vec::new(),
             subjects: Subjects::default(),
             predicates: BTreeMap::new(),
-            resolution: ResolutionSettings {
+            resolution: ResolutionPolicy {
                 trust_margin: Some(0.25),
                 on_unresolved: Some(OnUnresolved::Contested),
             },
-            trust: TrustSettings {
+            trust: TrustPolicy {
                 trusted_threshold: Some(0.80),
             },
-            freshness: FreshnessSettings {
+            freshness: FreshnessIntervals {
                 slow: Some(Interval("90d".into())),
                 volatile: Some(Interval("1h".into())),
             },
@@ -503,7 +532,7 @@ impl Policy {
     pub fn from_yaml(text: &str) -> Result<Self> {
         let document = PolicyDocument::from_yaml(text)?;
         let mut policy = Policy::default();
-        policy.apply(&document, &packs_extended_by(&document));
+        policy.layer_with_packs(&document, &packs_extended_by(&document));
         Ok(policy)
     }
 
@@ -515,7 +544,7 @@ impl Policy {
                 id: version.id.clone(),
                 scope: version.scope.clone(),
             });
-            policy.apply(&version.document, &version.packs);
+            policy.layer_with_packs(&version.document, &version.packs);
         }
         policy
     }
@@ -537,7 +566,7 @@ impl Policy {
     /// when they are identical canonical JSON.
     pub fn same_value(&self, predicate: &str, a: &Value, b: &Value) -> bool {
         self.value_type(predicate)
-            .and_then(|value_type| self.same_as(value_type, a, b))
+            .and_then(|value_type| self.same_typed_value(value_type, a, b))
             .unwrap_or_else(|| {
                 let canonical = |value: &Value| {
                     serde_jcs::to_string(&self.resolve_reference(value.clone())).ok()
@@ -548,38 +577,39 @@ impl Policy {
 
     /// A subject as Ledger keeps it: trimmed, lower-cased, and resolved through the aliases.
     pub fn canonical_subject(&self, subject: &str) -> String {
-        let mut name = canonical_name(subject);
-        // An overlay can make a tenant subject an alias, so the tenant's aliases of that subject
-        // lead on through it. Two layers that alias each other's subjects make a cycle, which
-        // stops before it repeats.
-        let mut seen = vec![];
-        while let Some(next) = self.subject_of.get(&name) {
-            if seen.contains(next) {
-                break;
-            }
-            seen.push(std::mem::replace(&mut name, next.clone()));
-        }
-        name
+        let name = canonical_name(subject);
+        self.subject_of.get(&name).cloned().unwrap_or(name)
     }
 
-    /// Checks a claim's value against its predicate's declared value type, and returns it as
-    /// Ledger keeps it, with any subject it names resolved through the aliases. The error says
-    /// what the predicate takes.
-    pub(crate) fn check_value(&self, predicate: &str, value: Value) -> Result<Value, String> {
+    /// Checks a claim against the policy, and returns its subject and value as Ledger keeps
+    /// them, with hints for an undeclared predicate. The error names the field that is wrong
+    /// and why.
+    pub(crate) fn admit(
+        &self,
+        subject: &str,
+        predicate: &str,
+        value: Value,
+    ) -> Result<Admitted, (&'static str, String)> {
+        if !is_subject(subject) {
+            return Err(("subject", not_a_subject(subject)));
+        }
+        Ok(Admitted {
+            subject: self.canonical_subject(subject),
+            value: self
+                .check_value(predicate, value)
+                .map_err(|reason| ("value", reason))?,
+            hints: self.hint_for(predicate).into_iter().collect(),
+        })
+    }
+
+    /// Checks a value against its predicate's declared value type, and returns it as Ledger
+    /// keeps it, with any subject it names resolved through the aliases. The error says what
+    /// the predicate takes.
+    fn check_value(&self, predicate: &str, value: Value) -> Result<Value, String> {
         let Some(value_type) = self.value_type(predicate) else {
             return Ok(self.resolve_reference(value));
         };
-        let fits = match value_type {
-            ValueType::Text | ValueType::Version => value.is_string(),
-            ValueType::Number => value.is_number(),
-            ValueType::Boolean => value.is_boolean(),
-            ValueType::Datetime => instant(&value).is_some(),
-            ValueType::Subject => named_subject(&value).is_some_and(is_subject),
-            ValueType::Enum(members) => value
-                .as_str()
-                .is_some_and(|value| members.iter().any(|member| member == value)),
-        };
-        if !fits {
+        if !value_type.admits(&value) {
             return Err(format!(
                 "{predicate} takes {}, not {value}",
                 value_type.describe()
@@ -595,7 +625,7 @@ impl Policy {
 
     /// A hint for a claim on `predicate` when the policy declares predicates but not this one,
     /// naming the declared predicate it most resembles if any is close.
-    pub(crate) fn hint_for(&self, predicate: &str) -> Option<String> {
+    fn hint_for(&self, predicate: &str) -> Option<String> {
         if self.predicates.is_empty() || self.predicates.contains_key(predicate) {
             return None;
         }
@@ -617,10 +647,10 @@ impl Policy {
     }
 
     /// Whether `a` and `b` are the same value of `value_type`, or None if either doesn't fit it.
-    fn same_as(&self, value_type: &ValueType, a: &Value, b: &Value) -> Option<bool> {
+    fn same_typed_value(&self, value_type: &ValueType, a: &Value, b: &Value) -> Option<bool> {
         Some(match value_type {
             ValueType::Text => folded(a.as_str()?) == folded(b.as_str()?),
-            ValueType::Number => a.as_f64()? == b.as_f64()?,
+            ValueType::Number => same_number(a.as_number()?, b.as_number()?),
             ValueType::Boolean | ValueType::Enum(_) => a == b,
             ValueType::Datetime => instant(a)? == instant(b)?,
             ValueType::Version => {
@@ -652,25 +682,36 @@ impl Policy {
     }
 
     /// Layers the packs a document extends, then the document itself, over this policy.
-    fn apply(&mut self, document: &PolicyDocument, packs: &BTreeMap<String, PolicyDocument>) {
+    fn layer_with_packs(
+        &mut self,
+        document: &PolicyDocument,
+        packs: &BTreeMap<String, PolicyDocument>,
+    ) {
         for name in &document.extends {
             if let Some(pack) = packs.get(name) {
-                self.overlay(pack);
+                self.layer(pack);
             }
             if !self.packs.contains(name) {
                 self.packs.push(name.clone());
             }
         }
-        self.overlay(document);
+        self.layer(document);
     }
 
-    /// Lets a document's declarations replace this policy's: each predicate whole, each alias,
-    /// and each setting it sets.
-    fn overlay(&mut self, document: &PolicyDocument) {
+    /// Lets a document's declarations replace this policy's: each predicate whole, and each
+    /// resolution, trust and freshness field it sets. Its aliases join this policy's.
+    fn layer(&mut self, document: &PolicyDocument) {
         self.predicates.extend(document.predicates.clone());
         for (subject, aliases) in &document.subjects.aliases {
+            let subject = canonical_name(subject);
             for alias in aliases {
-                self.alias(&canonical_name(alias), &canonical_name(subject));
+                let alias = canonical_name(alias);
+                self.subject_of.insert(alias.clone(), subject.clone());
+                self.subjects
+                    .aliases
+                    .entry(subject.clone())
+                    .or_default()
+                    .push(alias);
             }
         }
         if let Some(resolution) = &document.resolution {
@@ -687,23 +728,6 @@ impl Policy {
             ours.slow = freshness.slow.clone().or(ours.slow.take());
             ours.volatile = freshness.volatile.clone().or(ours.volatile.take());
         }
-    }
-
-    /// Makes `alias` name `subject`, moving it from any subject it named before.
-    fn alias(&mut self, alias: &str, subject: &str) {
-        if let Some(before) = self.subject_of.insert(alias.to_owned(), subject.to_owned())
-            && let Some(aliases) = self.subjects.aliases.get_mut(&before)
-        {
-            aliases.retain(|name| name != alias);
-            if aliases.is_empty() {
-                self.subjects.aliases.remove(&before);
-            }
-        }
-        self.subjects
-            .aliases
-            .entry(subject.to_owned())
-            .or_default()
-            .push(alias.to_owned());
     }
 }
 
@@ -745,6 +769,18 @@ fn named_subject(value: &Value) -> Option<&str> {
         }
         _ => None,
     }
+}
+
+/// Whether two numbers are numerically equal. Integers compare exactly, since an f64 can't
+/// tell large ones apart.
+fn same_number(a: &Number, b: &Number) -> bool {
+    if let (Some(a), Some(b)) = (a.as_i64(), b.as_i64()) {
+        return a == b;
+    }
+    if let (Some(a), Some(b)) = (a.as_u64(), b.as_u64()) {
+        return a == b;
+    }
+    a.as_f64() == b.as_f64()
 }
 
 /// Text as it is compared: NFKC-normalised, case-folded, trimmed, and with each run of
@@ -797,21 +833,22 @@ fn check_subject(path: &str, subject: &str) -> Result<()> {
     if is_subject(subject) {
         return Ok(());
     }
-    Err(invalid_policy(
-        path,
-        format!("{subject:?} is not a subject like service:billing-api"),
-    ))
+    Err(invalid_policy(path, not_a_subject(subject)))
+}
+
+fn not_a_subject(subject: &str) -> String {
+    format!("{subject:?} is not a subject like service:billing-api")
 }
 
 /// Whether `subject` is written `kind:name`.
-pub(crate) fn is_subject(subject: &str) -> bool {
+fn is_subject(subject: &str) -> bool {
     subject
         .trim()
         .split_once(':')
         .is_some_and(|(kind, name)| !kind.is_empty() && !name.is_empty())
 }
 
-fn invalid_policy(path: &str, reason: impl std::fmt::Display) -> Error {
+pub(crate) fn invalid_policy(path: &str, reason: impl std::fmt::Display) -> Error {
     if path == "." {
         return Error::InvalidPolicy(format!("invalid policy: {reason}; nothing was applied"));
     }

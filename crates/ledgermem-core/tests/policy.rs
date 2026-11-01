@@ -129,6 +129,12 @@ fn datetimes_are_the_same_when_they_name_the_same_instant() {
 fn numbers_are_the_same_when_numerically_equal() {
     assert!(same("replicas", json!(3), json!(3.0)));
     assert!(!same("replicas", json!(3), json!(3.5)));
+    // Past 2^53 an f64 can't tell these apart; integers compare exactly.
+    assert!(!same(
+        "replicas",
+        json!(9_007_199_254_740_993_u64),
+        json!(9_007_199_254_740_992_u64)
+    ));
 }
 
 #[test]

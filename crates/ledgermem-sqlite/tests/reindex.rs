@@ -219,8 +219,8 @@ impl Store for InterruptedStore {
     ) -> Result<Vec<Claim>, StoreError> {
         self.inner.search(tenant, scopes, query, limit)
     }
-    fn policy(&self, tenant: &str, scope: &Scope) -> Result<Option<PolicyVersion>, StoreError> {
-        self.inner.policy(tenant, scope)
+    fn policies(&self, tenant: &str, scopes: &[Scope]) -> Result<Vec<PolicyVersion>, StoreError> {
+        self.inner.policies(tenant, scopes)
     }
     fn journal(&self, tenant: &str, scope: &str) -> Result<Vec<StoredEntry>, StoreError> {
         self.inner.journal(tenant, scope)

@@ -25,8 +25,8 @@ pub use ops::{
     Remember, RememberOutcome, ScopeVerification,
 };
 pub use policy::{
-    AgentClaims, AppliedVersion, Authority, Cardinality, FreshnessClass, FreshnessSettings,
+    AgentClaims, AppliedVersion, Authority, Cardinality, FreshnessClass, FreshnessIntervals,
     Interval, OnUnresolved, Policy, PolicyDocument, PolicyVersion, Predicate, PredicatePack,
-    ResolutionSettings, Subjects, TrustSettings, ValueType, VerifierName, VerifierRef,
+    ResolutionPolicy, Subjects, TrustPolicy, ValueType, VerifierName, VerifierRef,
 };
 pub use store::{Commit, JournalHead, Projection, Store, StoreError, StoredJournal};

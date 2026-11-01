@@ -560,6 +560,7 @@ dependencies = [
  "ledgermem-sqlite",
  "rmcp",
  "rusqlite",
+ "serde",
  "serde_json",
  "serde_yaml",
  "tempfile",

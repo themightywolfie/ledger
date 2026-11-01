@@ -142,8 +142,11 @@ impl Step {
         let mut present = actions.into_iter().flatten();
         match (present.next(), present.next()) {
             (Some(action), None) => Ok(action),
-            _ => Err("a step needs exactly one of remember, recall, journal, verify, reindex,                       apply_policy or show_policy"
-                .into()),
+            _ => Err(
+                "a step needs exactly one of remember, recall, journal, verify, reindex, \
+                      apply_policy or show_policy"
+                    .into(),
+            ),
         }
     }
 }
