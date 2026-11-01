@@ -13,10 +13,11 @@ dirs.workspace = true
 ledgermem-core.workspace = true
 ledgermem-server.workspace = true
 ledgermem-sqlite.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
 rmcp = { workspace = true, features = ["client", "transport-child-process"] }
-serde_json.workspace = true
+rusqlite.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["process"] }

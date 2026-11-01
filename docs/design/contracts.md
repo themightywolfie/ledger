@@ -179,7 +179,7 @@ Base path `/v1`. JSON in and out. Every request needs `Authorization: Bearer lm_
 | `GET /v1/conflicts?scope=&state=open\|closed` · `GET /v1/conflicts/{id}` | Conflict sets. |
 | `GET /v1/questions?state=open` · `POST /v1/questions/{id}/answer` | Open questions. The answer is `confirm`, `reject`, `pick` (a winner) or `value`. |
 | `GET /v1/journal?scope=&after_seq=&limit=` | Journal entries for one scope. |
-| `GET /v1/journal/verify` | Verify every chain in the tenant: `{ "ok", "scopes": [ { "scope", "entries", "head_hash", "broken_at"? } ] }`. |
+| `GET /v1/journal/verify` | Verify every chain in the tenant: `{ "ok", "scopes": [ { "scope", "entries", "head_hash", "broken_at"?: { "seq", "problem" } } ] }`. `problem` is `missing_entry`, `content_hash_mismatch`, `prev_hash_mismatch` or `entry_hash_mismatch` (claims-and-integrity.md, section 11). |
 | `GET /v1/policy` · `GET /v1/policy/versions` · `POST /v1/policy` | Read the policy, list its versions, apply a new one (YAML or JSON body). |
 | `GET /v1/predicates/undeclared` | Undeclared predicates in use, with counts and the nearest declared predicate. |
 | `GET /v1/aliases/suggestions` | Suggested subject aliases, for an operator to accept through a policy change. |
@@ -245,6 +245,8 @@ ledgermem demo [--tenant demo]                   # create a tenant loaded with t
 `ledgermem serve` prints a sign-in link for the visualizer: `http://127.0.0.1:7437/ui/#key=lm_…`. The key belongs to a local operator key that `serve` creates on first run. It sits in the URL fragment, so it never reaches request logs. The visualizer keeps it in session storage, and also accepts a pasted operator key for a remote server.
 
 CLI commands act as the local operator (channel `cli`) on the database they open. Without `--tenant`, they use `local`. Every command supports `--json` for machine-readable output.
+
+Exit codes: `0` success, `1` an error (printed to stderr), `2` a usage error, and `3` from `verify` when any journal is broken. `reindex` refuses a journal that doesn't verify and exits `1`, naming the scope and entry.
 
 ## 4. Server config (`ledgermem.toml`)
 

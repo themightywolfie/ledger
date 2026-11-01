@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ledgermem_core::{
-    Caller, ClaimInput, JournalQuery, Ledger, Permission, Recall, Remember, TestClock,
+    Caller, Channel, ClaimInput, JournalQuery, Ledger, Permission, Recall, Remember, TestClock,
 };
 use ledgermem_sqlite::SqliteStore;
 use serde::Deserialize;
@@ -60,6 +60,8 @@ struct CallerSpec {
 #[serde(rename_all = "snake_case")]
 enum CallerKind {
     Agent,
+    /// A person looking after the tenant from the command line.
+    Operator,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,7 +73,39 @@ struct Step {
     remember: Option<ClaimInput>,
     recall: Option<Recall>,
     journal: Option<JournalQuery>,
+    /// Verify every journal in the caller's tenant. Takes no arguments: `verify: {}`.
+    verify: Option<Value>,
+    /// Rebuild the caller's tenant's projections from its journals: `reindex: {}`.
+    reindex: Option<Value>,
     expect: Option<Value>,
+}
+
+/// The one engine operation a step plays.
+enum Action {
+    Remember(ClaimInput),
+    Recall(Recall),
+    Journal(JournalQuery),
+    Verify,
+    Reindex,
+}
+
+impl Step {
+    fn take_action(&mut self) -> Result<Action, String> {
+        let actions = [
+            self.remember.take().map(Action::Remember),
+            self.recall.take().map(Action::Recall),
+            self.journal.take().map(Action::Journal),
+            self.verify.take().map(|_| Action::Verify),
+            self.reindex.take().map(|_| Action::Reindex),
+        ];
+        let mut present = actions.into_iter().flatten();
+        match (present.next(), present.next()) {
+            (Some(action), None) => Ok(action),
+            _ => Err(
+                "a step needs exactly one of remember, recall, journal, verify or reindex".into(),
+            ),
+        }
+    }
 }
 
 fn local() -> String {
@@ -105,7 +139,13 @@ pub async fn run(yaml: &str) -> Result<(), String> {
 }
 
 fn build_caller(name: &str, spec: &CallerSpec) -> Caller {
-    let CallerKind::Agent = spec.kind;
+    if let CallerKind::Operator = spec.kind {
+        let permissions = spec
+            .permissions
+            .clone()
+            .unwrap_or_else(|| vec![Permission::Read, Permission::Operator, Permission::Admin]);
+        return Caller::operator(&spec.tenant, name, Channel::Cli).with_permissions(permissions);
+    }
     let agent = spec.agent.as_deref().unwrap_or(name);
     let permissions = spec
         .permissions
@@ -124,7 +164,7 @@ async fn run_step(
     ledger: &Ledger,
     clock: &TestClock,
     callers: &BTreeMap<String, Caller>,
-    step: Step,
+    mut step: Step,
 ) -> Result<(), String> {
     if let Some(by) = &step.advance {
         clock.advance(parse_duration(by)?);
@@ -139,8 +179,8 @@ async fn run_step(
         .get(name)
         .ok_or_else(|| format!("unknown caller {name:?}"))?;
 
-    let outcome = match (step.remember, step.recall, step.journal) {
-        (Some(claim), None, None) => {
+    let outcome = match step.take_action()? {
+        Action::Remember(claim) => {
             let remember = Remember {
                 claims: vec![claim],
             };
@@ -151,9 +191,10 @@ async fn run_step(
                     .unwrap_or(Value::Null)
             })
         }
-        (None, Some(recall), None) => to_json(ledger.recall(caller, recall).await),
-        (None, None, Some(query)) => to_json(ledger.journal(caller, query).await),
-        _ => return Err("a step needs exactly one of remember, recall or journal".into()),
+        Action::Recall(recall) => to_json(ledger.recall(caller, recall).await),
+        Action::Journal(query) => to_json(ledger.journal(caller, query).await),
+        Action::Verify => to_json(ledger.verify_journals(caller).await),
+        Action::Reindex => to_json(ledger.reindex(caller).await),
     };
 
     let expected = step.expect.unwrap_or(Value::Null);
