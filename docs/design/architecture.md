@@ -97,7 +97,7 @@ A correction is not a separate operation. It is `remember` called through the vi
 | --- | --- |
 | tenant | The one tenant this caller may touch. |
 | actor | Who is acting (`agent:claude-code`, `operator:samaksh`, `integration:langgraph`). |
-| channel | agent, integration, visualizer, cli, elicitation (see ADR-0009). |
+| channel | agent, integration, visualizer, cli, elicitation (see ADR-0009), and internal, used only by the engine's job runner for Ledger's own re-verification. |
 | permissions | Some of: read, propose, attest, resolve, forget, relay_user, declare_source, operator, admin. |
 | scope bounds | The widest scopes the caller may read and write (org; user id; project id; agent id). Calls may only narrow these, for example to a session. |
 
@@ -122,7 +122,7 @@ A correction is not a separate operation. It is `remember` called through the vi
 | Policy | Parses, validates and versions policy documents, applies predicate packs and overlays, and resolves aliases. |
 | Projector | Turns journal entries into projection updates (claims, chains, conflict sets, questions, the recall index). It is used both for live writes and for `reindex` and restore. |
 | Journal | Builds entries, computes content hashes and chain hashes, and verifies chains. |
-| Job runner | Durable queued jobs: async verification, stale re-verification, embedding, index purge after a forget. |
+| Job runner | Durable queued jobs: async verification, stale re-verification, embedding, index purge after a forget. The process serving the ledger runs it every second, and leases keep two runners from taking the same job. |
 | Guard | `check_before_act`: gathers the claims the action relies on, re-verifies within budget, and decides go, re-verify or block. |
 
 These modules have **internal seams** that their own unit tests may use (the relation classifier and trust scorer are pure functions, for example). None of them is part of the engine's interface.
@@ -200,7 +200,7 @@ Surfaces are adapters at the engine's seam. Each does exactly three things: auth
 | `ledgermem serve` | HTTP: REST at `/v1`, MCP at `/mcp`, visualizer at `/ui` | API key. The visualizer uses an operator key and binds to localhost by default. |
 | CLI subcommands | in-process | The local operator on that machine, with channel `cli` (`ledgermem policy apply`, `backup`, `restore`, `questions`, `reindex`, `verify`, `tenant`, `key`). |
 
-The MCP surface uses `rmcp` (the official Rust SDK), which implements the 2026-07-28 stateless specification, Streamable HTTP and the Tasks extension. Slow verification inside `memory_remember` and `memory_attest` becomes an MCP task when the client announces Tasks support. Otherwise the call returns at once with the claim `proposed` and verification pending.
+The MCP surface uses `rmcp` (the official Rust SDK), which implements the 2026-07-28 stateless specification, Streamable HTTP and the Tasks extension. Both write at once, with any slow check queued in the same write. When the client announces Tasks support, the call becomes an MCP task that runs the queued check and returns the settled result. Otherwise the call returns at once with the claim `proposed` and verification pending.
 
 ## Workspace layout
 
@@ -250,7 +250,7 @@ The journal is the source of truth and every other table is a projection (ADR-00
 | `conflict_sets`, `questions` | projection | Open and closed conflict sets and open questions. |
 | `claims_fts` | projection | FTS5 index over claim text, subject and aliases. |
 | `claim_vectors` | projection | Embeddings of claim text. |
-| `jobs` | operational | The durable job queue. |
+| `jobs` | operational | The durable job queue: at most one waiting job per claim, each leased to the runner that takes it. A finished job leaves the table. |
 
 `ledgermem reindex` drops every projection and replays the journal. Restore is the same replay into an empty tenant, after verifying each chain.
 

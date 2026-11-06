@@ -38,6 +38,7 @@ fn refutation(claim: &Claim) -> Commit {
             content: json!({ "claim_id": claim.id, "reason": "refuted" }),
         }],
         projections: vec![Projection::PutClaim(refuted)],
+        ..Commit::default()
     }
 }
 

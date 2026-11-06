@@ -38,7 +38,7 @@ Stdio servers act with permissions `read, propose, attest, relay_user`. HTTP cal
 
 `ledgermem init` prints these for the current directory.
 
-**Tasks.** When a client announces the Tasks extension, a `memory_remember` or `memory_attest` call that needs a slow verifier is returned as a task, and the client polls `tasks/get`. Without Tasks support, the call returns at once with `verification: "pending"` and the claim `proposed`.
+**Tasks.** A slow verifier is one whose check no write may wait on, such as `test_run` with `rerun: true`. When a client announces the Tasks extension, a `memory_remember` or `memory_attest` call that needs a slow verifier is returned as a task, and the client polls `tasks/get`. Either way the call writes at once: the claim is memory, `proposed`, with its check queued in the same write. The task runs that check, and its result is what the call would have returned had the check run inline, kept for 30 minutes. Without Tasks support, the call returns at once with `verification: "pending"` (or, for `memory_attest`, `outcome: "pending"`), and the job runner runs the check. A task lives in the server's memory, so a server that stops loses its tasks, but never the claim or its check: the queue survives a restart, and another runner takes the check over once its lease runs out.
 
 **Elicitation.** When the client supports elicitation and a predicate's verifier is `human` with `ask: user`, Ledger asks the user directly, and the answer is recorded as a user statement (channel `elicitation`).
 
@@ -107,7 +107,7 @@ Shapes are abbreviated. The JSON Schemas generated from the Rust types are autho
     "hints": [] } ] }                // e.g. "undeclared predicate 'tests_passing'; did you mean 'test_status'?"
 ```
 
-`status` can also be `quarantined` (claims-and-integrity.md, section 3), or `retracted` with `"reason": "refuted"` when the predicate's verifier observed the opposite. `verification` is `none` when nothing checked the claim: its predicate declares no verifier, the server doesn't have the one it declares, or the claim was quarantined. Hints also say why a claim was quarantined, why a relayed user statement didn't count, that a `source` was ignored, why the verifier didn't pass the claim, and when the server doesn't have the predicate's verifier.
+`status` can also be `quarantined` (claims-and-integrity.md, section 3), or `retracted` with `"reason": "refuted"` when the predicate's verifier observed the opposite. `verification` is `none` when nothing checked the claim: its predicate declares no verifier, the server doesn't have the one it declares, or the claim was quarantined. It is `pending` when a slow verifier checks the claim in the background. Hints also say why a claim was quarantined, why a relayed user statement didn't count, that a `source` was ignored, why the verifier didn't pass the claim, and when the server doesn't have the predicate's verifier.
 
 Evidence a caller attaches is recorded on the claim, hashed and timestamped, but attests nothing until a verifier checks the claim (claims-and-integrity.md, section 5).
 
@@ -362,7 +362,7 @@ Applying a version journals it, with the packs it extends as they were at that m
 
 | Verifier | Params | Checks |
 | --- | --- | --- |
-| `test_run` | `report: junit` (default), `rerun: bool` | Reads the subject repo's JUnit report from server config, and compares failures and errors against the claimed value. `rerun` re-runs the configured command asynchronously. |
+| `test_run` | `report: junit` (default), `rerun: bool` | Reads the subject repo's JUnit report from server config. Test cases with a failure or an error make the observed value `failing`, and none make it `passing`, compared with the claimed value. A report with no test cases, or one that ends before its elements close, is inconclusive. `rerun: true` first runs the configured command, with no shell and for at most ten minutes, which makes the check slow, so it always runs in the background. A failing exit is no reason to stop, since failing tests exit that way, but a run that writes no fresh report is inconclusive, never answered from the old report. |
 | `git` | `check: commit_exists \| branch_exists \| merged_into \| file_contains`, plus `ref`, `into`, `path`, `pattern` | Against the local clone server config names for the subject, such as `repo:acme/billing-api`, through the `git` command. |
 | `github` | `check: pr_state \| ci_status`, `repo` | Through the GitHub REST API with the configured token. |
 | `http.<name>` | `path` (template), `pointer` (JSON Pointer), `compare: equals \| contains` | GET only, against the named endpoint in server config. |

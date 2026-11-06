@@ -165,6 +165,7 @@ ceiling       = 0.60 if the only passing attestation is llm_judge, else 1.00
 - **A fail** (the verifier observes the opposite) retracts a proposed or verified claim with reason `refuted`, and the evidence that refuted it attached. A retracted claim is never recalled or attested again. A contested claim leaves its conflict set only through a resolution, so a fail there is recorded and decides nothing on its own.
 - **An inconclusive result** (a timeout, a missing tool, a ref the verifier can't find) changes nothing, and is recorded as evidence with outcome `inconclusive`.
 - **A verifier the server doesn't have** leaves the claim as the write gate left it, with a hint saying so. Attesting such a claim with no evidence to attach is `verifier_unavailable`.
+- **A slow verifier**, one whose check no write may wait on (such as re-running a test suite), checks the claim in the background. The claim is written as it stands, with its check queued in the same write, and the write returns with verification `pending`. The job runner checks it later and records the outcome as an attestation by Ledger itself: actor `system:ledger`, channel `internal`. Over MCP, a client that announced the Tasks extension also gets a task, which runs the queued check and returns the settled result (contracts.md, section 1).
 
 Evidence a caller attaches, from its own tools, is recorded and hashed with strength 0: it attests nothing until a verifier checks the claim. Only passing evidence counts toward `attestation` and toward when the claim was last attested (section 6), so neither an inconclusive check nor a caller's own evidence raises trust or keeps a claim fresh.
 
@@ -191,7 +192,9 @@ Every score is returned with its components so the visualizer and `memory_recall
 | slow | 90 days |
 | volatile | 1 hour |
 
-A predicate's `reverify_after` replaces its class's interval, and gives even a `stable` predicate one. Undeclared predicates are `slow`. A claim is **stale** when `now − last_attested_at > interval`, where `last_attested_at` is when its latest passing attestation was observed, or, for a claim no passing attestation backs, `now − recorded_at > interval`. A claim is still fresh at the very end of its interval. Staleness is computed at read time from the clock port. Nothing sweeps on a timer in v1. `recall` enqueues re-verification for stale volatile claims it returns, and `check_before_act` re-verifies inline.
+A predicate's `reverify_after` replaces its class's interval, and gives even a `stable` predicate one. Undeclared predicates are `slow`. A claim is **stale** when `now − last_attested_at > interval`, where `last_attested_at` is when its latest passing attestation was observed, or, for a claim no passing attestation backs, `now − recorded_at > interval`. A claim is still fresh at the very end of its interval. Staleness is computed at read time from the clock port. Nothing sweeps on a timer in v1. `recall` enqueues re-verification for the stale volatile claims it returns, when their verifier is on the server, and never waits for it. A claim already waiting on a job isn't queued twice. `check_before_act` re-verifies inline.
+
+**The job queue** is durable. A job is leased to the runner that takes it, and a runner that stops before it finishes leaves the job to another once the lease (15 minutes) runs out. A job whose claim is no longer proposed, verified or contested by the time it runs finishes without checking it. A job checks its claim under the policy of the claim's own scope: the tenant policy, with the claim's project overlay when it lives in a project. `recall` queues a claim only if that policy declares a verifier the server has, so the `stale` list never names a claim nothing will re-verify. A job that fails stays leased and runs again, and the others still run. The read still answers if queueing fails, with nothing named as queued.
 
 ## 7. Relation classification (write time)
 
@@ -266,7 +269,7 @@ The caller may pass `intent` (`current`, `as_of`, `history`, `change`) and `at` 
 }
 ```
 
-Each claim is scored, and judged stale, trusted and injectable, under the policy in effect for the caller: the tenant policy with the caller's project overlay, the same policy `remember` checks claims against.
+Each claim is scored, and judged stale, trusted and injectable, under the policy in effect for the caller: the tenant policy with the caller's project overlay, the same policy `remember` checks claims against. `stale` names the stale claims in the answer set whose re-verification is queued (section 6).
 
 ### Guidance
 

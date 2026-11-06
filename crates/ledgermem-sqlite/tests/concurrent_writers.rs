@@ -23,7 +23,7 @@ fn one_entry(id: String, scope: &Scope) -> Commit {
             recorded_at: datetime!(2026-10-25 09:00 UTC),
             content: json!({}),
         }],
-        projections: vec![],
+        ..Commit::default()
     }
 }
 

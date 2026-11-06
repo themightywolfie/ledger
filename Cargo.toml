@@ -18,6 +18,7 @@ ledgermem-verifiers = { path = "crates/ledgermem-verifiers" }
 caseless = "0.2"
 clap = { version = "4.6", features = ["derive"] }
 dirs = "7.0"
+quick-xml = "0.42"
 regex = "1.13"
 rmcp = { version = "3.7", default-features = false }
 rusqlite = { version = "0.41", features = ["bundled"] }

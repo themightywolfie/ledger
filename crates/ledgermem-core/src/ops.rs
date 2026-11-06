@@ -166,6 +166,44 @@ pub enum Verification {
     Unchecked,
     /// Its verifier ran inline, and the claim's status shows the outcome.
     Done,
+    /// Its verifier is slow, so it checks the claim in the background, and the claim stays as
+    /// written until it has.
+    Pending,
+}
+
+/// What attesting found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttestedOutcome {
+    /// The verifier found that the claim holds.
+    Pass,
+    /// The verifier observed the opposite, which refutes the claim.
+    Fail,
+    /// Nothing could tell, so nothing changed.
+    Inconclusive,
+    /// The verifier is slow, so it checks the claim in the background.
+    Pending,
+}
+
+impl From<Outcome> for AttestedOutcome {
+    fn from(outcome: Outcome) -> Self {
+        match outcome {
+            Outcome::Pass => AttestedOutcome::Pass,
+            Outcome::Fail => AttestedOutcome::Fail,
+            Outcome::Inconclusive => AttestedOutcome::Inconclusive,
+        }
+    }
+}
+
+/// What a run of the job runner did.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct JobsRun {
+    /// How many jobs it ran.
+    pub ran: u64,
+    /// Why each job that failed did. A failed job stays leased, and runs again once its lease
+    /// runs out.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failed: Vec<String>,
 }
 
 /// Attach evidence to a claim, or ask Ledger to check it now against its verifier.
@@ -190,8 +228,9 @@ fn verify_now_by_default() -> bool {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AttestOutcome {
     pub claim_id: ClaimId,
-    /// What checking the claim found. Inconclusive when nothing could check it.
-    pub outcome: Outcome,
+    /// What checking the claim found. Inconclusive when nothing could check it, and pending
+    /// while a slow verifier checks it in the background.
+    pub outcome: AttestedOutcome,
     pub status: Status,
     /// Why the claim was retracted, when it was.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -245,6 +284,9 @@ pub struct ReadPack {
     pub intent: ReadIntent,
     /// Every candidate, best match first, each labelled with how far it can be relied on.
     pub answer_set: Vec<RecalledClaim>,
+    /// The stale claims in the answer set whose re-verification is queued, so a later read may
+    /// find them fresh.
+    pub stale: Vec<ClaimId>,
     pub guidance: Guidance,
 }
 

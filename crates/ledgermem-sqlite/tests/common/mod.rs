@@ -3,7 +3,7 @@
 use std::sync::Mutex;
 
 use ledgermem_core::{
-    Claim, ClaimId, Commit, JournalHead, PolicyVersion, Projection, Scope, Store, StoreError,
+    Claim, ClaimId, Commit, Job, JournalHead, PolicyVersion, Projection, Scope, Store, StoreError,
     StoredEntry, StoredJournal,
 };
 use ledgermem_sqlite::SqliteStore;
@@ -58,6 +58,25 @@ impl Store for LateWriteStore {
         id: &ClaimId,
     ) -> Result<Option<(Claim, JournalHead)>, StoreError> {
         self.inner.claim(tenant, id)
+    }
+    fn lease_job(
+        &self,
+        now: OffsetDateTime,
+        until: OffsetDateTime,
+    ) -> Result<Option<Job>, StoreError> {
+        self.inner.lease_job(now, until)
+    }
+    fn lease_job_for(
+        &self,
+        tenant: &str,
+        claim_id: &ClaimId,
+        now: OffsetDateTime,
+        until: OffsetDateTime,
+    ) -> Result<Option<Job>, StoreError> {
+        self.inner.lease_job_for(tenant, claim_id, now, until)
+    }
+    fn job_waits(&self, tenant: &str, claim_id: &ClaimId) -> Result<bool, StoreError> {
+        self.inner.job_waits(tenant, claim_id)
     }
     fn search(
         &self,

@@ -17,7 +17,7 @@ use ledgermem_core::{Check, Observation, Verifier, Verifying};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::{NOTHING_TO_FIND, TIMEOUT, contains, needs, unsupported};
+use crate::{NOTHING_TO_FIND, blocking, contains, needs, unsupported};
 
 /// The largest file `contains` reads.
 const MAX_SEARCHED: u64 = 64 * 1024 * 1024;
@@ -88,15 +88,9 @@ impl Verifier for FileVerifier {
                 Ok(file_check) => file_check,
                 Err(why) => return Observation::inconclusive(why),
             };
-            let observing = tokio::task::spawn_blocking(move || file_check.observe());
-            match tokio::time::timeout(TIMEOUT, observing).await {
-                Ok(Ok(observation)) => observation,
-                Ok(Err(error)) => Observation::inconclusive(format!("the check failed: {error}")),
-                Err(_) => Observation::inconclusive(format!(
-                    "reading the file took longer than {}s",
-                    TIMEOUT.as_secs()
-                )),
-            }
+            blocking("reading the file", move || file_check.observe())
+                .await
+                .unwrap_or_else(Observation::inconclusive)
         })
     }
 }

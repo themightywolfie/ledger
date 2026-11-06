@@ -169,6 +169,8 @@ fn channel_source(channel: Channel) -> (SourceKind, Option<EvidenceKind>) {
         // The user's answer becomes a user statement once elicitation lands (ticket #18).
         Channel::Elicitation => (SourceKind::UserStated, None),
         Channel::Agent | Channel::Integration => (SourceKind::AgentClaim, None),
+        // Ledger's own re-verification attests claims; it never writes one.
+        Channel::Internal => (SourceKind::System, None),
     }
 }
 

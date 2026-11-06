@@ -8,7 +8,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use ledgermem_core::{
-    Claim, ClaimId, Commit, JournalHead, PolicyVersion, Projection, Scope, Store, StoreError,
+    Claim, ClaimId, Commit, Job, JournalHead, PolicyVersion, Projection, Scope, Store, StoreError,
     StoredEntry, StoredJournal, genesis_hash,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -58,7 +58,7 @@ const SCHEMA: &str = "
 ";
 
 /// Each migration takes the schema up one version: the first from version 1 to 2.
-const MIGRATIONS: [&str; 1] = [
+const MIGRATIONS: [&str; 2] = [
     // A projection, so it starts empty: no journal before version 2 holds a policy version.
     "CREATE TABLE policies (
         tenant   TEXT NOT NULL REFERENCES tenants (id),
@@ -66,6 +66,16 @@ const MIGRATIONS: [&str; 1] = [
         version  TEXT NOT NULL,
         body     TEXT NOT NULL,
         PRIMARY KEY (tenant, scope)
+    ) STRICT;",
+    // The job queue: operational, so it starts empty. A finished job leaves it. Times are Unix
+    // milliseconds, so they compare as numbers.
+    "CREATE TABLE jobs (
+        id            TEXT PRIMARY KEY,
+        tenant        TEXT NOT NULL REFERENCES tenants (id),
+        claim_id      TEXT NOT NULL,
+        queued_at     INTEGER NOT NULL,
+        leased_until  INTEGER,
+        UNIQUE (tenant, claim_id)
     ) STRICT;",
 ];
 
@@ -223,8 +233,76 @@ impl Store for SqliteStore {
         for projection in commit.projections {
             apply_projection(&tx, tenant, projection)?;
         }
+        for job in commit.queued {
+            // A claim already waiting on a job keeps the one it has.
+            tx.execute(
+                "INSERT OR IGNORE INTO jobs (id, tenant, claim_id, queued_at) VALUES (?1, ?2, ?3, ?4)",
+                params![job.id, tenant, job.claim_id.as_str(), millis(job.queued_at)],
+            )
+            .map_err(StoreError::new)?;
+        }
+        for job in commit.finished {
+            tx.execute("DELETE FROM jobs WHERE id = ?1", [job])
+                .map_err(StoreError::new)?;
+        }
         tx.commit().map_err(StoreError::new)?;
         Ok(true)
+    }
+
+    fn lease_job(
+        &self,
+        now: OffsetDateTime,
+        until: OffsetDateTime,
+    ) -> Result<Option<Job>, StoreError> {
+        // One statement picks and leases the job, so two runners never lease the same one.
+        let conn = self.conn()?;
+        let leased = conn
+            .query_row(
+                "UPDATE jobs SET leased_until = ?2
+                 WHERE id = (SELECT id FROM jobs
+                             WHERE leased_until IS NULL OR leased_until <= ?1
+                             ORDER BY queued_at, id LIMIT 1)
+                 RETURNING id, tenant, claim_id",
+                params![millis(now), millis(until)],
+                leased_job,
+            )
+            .optional()
+            .map_err(StoreError::new)?;
+        leased.map(into_job).transpose()
+    }
+
+    fn lease_job_for(
+        &self,
+        tenant: &str,
+        claim_id: &ClaimId,
+        now: OffsetDateTime,
+        until: OffsetDateTime,
+    ) -> Result<Option<Job>, StoreError> {
+        let conn = self.conn()?;
+        let leased = conn
+            .query_row(
+                "UPDATE jobs SET leased_until = ?4
+                 WHERE tenant = ?1 AND claim_id = ?2
+                   AND (leased_until IS NULL OR leased_until <= ?3)
+                 RETURNING id, tenant, claim_id",
+                params![tenant, claim_id.as_str(), millis(now), millis(until)],
+                leased_job,
+            )
+            .optional()
+            .map_err(StoreError::new)?;
+        leased.map(into_job).transpose()
+    }
+
+    fn job_waits(&self, tenant: &str, claim_id: &ClaimId) -> Result<bool, StoreError> {
+        self.conn()?
+            .query_row(
+                "SELECT 1 FROM jobs WHERE tenant = ?1 AND claim_id = ?2",
+                params![tenant, claim_id.as_str()],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|found| found.is_some())
+            .map_err(StoreError::new)
     }
 
     fn claim(
@@ -409,6 +487,24 @@ fn stored_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredEntry> {
         prev_hash: row.get(9)?,
         entry_hash: row.get(10)?,
     })
+}
+
+/// A job's id, tenant and claim, as a lease returns them.
+fn leased_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, String, String)> {
+    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+}
+
+fn into_job((id, tenant, claim_id): (String, String, String)) -> Result<Job, StoreError> {
+    Ok(Job {
+        id,
+        tenant,
+        claim_id: serde_json::from_value(Value::String(claim_id)).map_err(StoreError::new)?,
+    })
+}
+
+/// A time as Unix milliseconds, the way the job queue keeps it.
+fn millis(at: OffsetDateTime) -> i64 {
+    i64::try_from(at.unix_timestamp_nanos() / 1_000_000).unwrap_or(i64::MAX)
 }
 
 /// The sequence number of the last entry in one scope's journal, or 0 when it has none.

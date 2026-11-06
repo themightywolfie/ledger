@@ -1,0 +1,98 @@
+name: a read queues re-verification of the stale volatile claims it returns, and never waits for it
+clock: 2026-11-01T09:00:00Z
+policy:
+  version: 1
+  extends: [software-delivery]
+  predicates:
+    deployed_version:
+      value_type: version
+      freshness: volatile
+      system_of_record: http.status_api
+      verifier: { use: http.status_api }
+    feature_flag: { freshness: volatile }
+callers:
+  coder: { kind: agent, project: billing-api }
+  person: { kind: operator, permissions: [read, propose, operator] }
+verifiers:
+  http.status_api:
+    "service:billing-api": { outcome: pass, observed: "2.14.0", summary: "the status API reports 2.14.0" }
+steps:
+  - as: coder
+    remember: { subject: "service:billing-api", predicate: deployed_version, value: "2.14.0", text: "billing-api is running 2.14.0" }
+    label: deploy
+    expect: { status: verified }
+  # A volatile claim with no verifier goes stale too, but nothing can check it again.
+  - as: coder
+    remember: { subject: "service:billing-api", predicate: migration_status, value: applied, text: "billing-api's invoices migration is applied" }
+    label: migration
+
+  # Fresh claims need no re-verification.
+  - as: coder
+    recall: { query: "billing-api" }
+    expect: { stale: [] }
+
+  # Once stale, a read returns the claim as it stands, and queues its re-verification.
+  - advance: 61m
+  - as: coder
+    recall: { query: "running" }
+    expect:
+      answer_set: [{ status: verified, stale: true, trust: { score: 0.76 } }]
+      stale: ["$deploy"]
+      guidance: { code: stale }
+  - as: coder
+    recall: { query: "billing-api" }
+    expect:
+      answer_set: [{ stale: true }, { stale: true }]
+      stale: ["$deploy"]
+
+  # Two reads queued one job, which the runner runs once.
+  - run_jobs: {}
+    expect: { ran: 1 }
+  - as: coder
+    recall: { query: "running" }
+    expect:
+      answer_set: [{ status: verified, stale: false, trust: { score: 0.95 } }]
+      stale: []
+      guidance: { code: reliable }
+
+  # Re-verification that finds the world has moved on retracts the claim.
+  - script:
+      http.status_api:
+        "service:billing-api": { outcome: fail, observed: "2.15.0", summary: "the status API reports 2.15.0" }
+  - advance: 61m
+  - as: coder
+    recall: { query: "running" }
+    expect: { stale: ["$deploy"] }
+  - run_jobs: {}
+    expect: { ran: 1 }
+  - as: coder
+    recall: { query: "running" }
+    expect: { answer_set: [], stale: [] }
+  - as: coder
+    journal: { scope: "project:billing-api" }
+    expect:
+      - { kind: claim_written }
+      - { kind: claim_written }
+      - { kind: evidence_attached, actor: "system:ledger" }
+      - { kind: evidence_attached, actor: "system:ledger", content: { evidence: [{ outcome: fail, observed: "2.15.0" }] } }
+      - { kind: claim_retracted, actor: "system:ledger", content: { claim_id: "$deploy", reason: refuted } }
+
+  # A claim is re-verified under the policy of its own scope. This org claim's policy declares no
+  # verifier, so the read doesn't name it as queued, although the reader's overlay has one.
+  - as: person
+    apply_policy:
+      project: billing-api
+      document:
+        version: 1
+        predicates:
+          feature_flag: { freshness: volatile, verifier: { use: http.status_api } }
+  - as: person
+    remember: { subject: "service:flags", predicate: feature_flag, value: "on", text: "the flags service has new-invoices on" }
+  - advance: 61m
+  - as: coder
+    recall: { query: "flags" }
+    expect:
+      answer_set: [{ stale: true }]
+      stale: []
+  - run_jobs: {}
+    expect: { ran: 0 }

@@ -622,10 +622,12 @@ name = "ledgermem-server"
 version = "0.1.0"
 dependencies = [
  "ledgermem-core",
+ "ledgermem-sqlite",
  "rmcp",
  "schemars",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -646,9 +648,11 @@ name = "ledgermem-verifiers"
 version = "0.1.0"
 dependencies = [
  "ledgermem-core",
+ "quick-xml",
  "serde_json",
  "sha2",
  "tempfile",
+ "time",
  "tokio",
 ]
 
@@ -797,6 +801,15 @@ dependencies = [
  "tokio",
  "tracing",
  "windows",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.42.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41b1177fdf999d2321d3fb46ff47159d9c1fb9ad66a4879f8c50a0b504615e9b"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]

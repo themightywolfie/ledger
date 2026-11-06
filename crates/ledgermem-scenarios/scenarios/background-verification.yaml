@@ -1,0 +1,76 @@
+name: a slow verifier checks a claim in the background, and the claim stays proposed until it has
+clock: 2026-11-01T09:00:00Z
+policy: { version: 1, extends: [software-delivery] }
+callers:
+  coder: { kind: agent, project: billing-api }
+verifiers:
+  test_run:
+    "repo:acme/billing-api": { outcome: pass, observed: passing, summary: "412 of 412 tests pass" }
+    "repo:acme/payments": { outcome: fail, observed: failing, summary: "2 of 96 tests fail" }
+slow: [test_run]
+steps:
+  # The write returns at once, with the check queued.
+  - as: coder
+    remember: { subject: "repo:acme/billing-api", predicate: test_status, value: passing, text: "all tests pass" }
+    expect: { status: proposed, verification: pending, trust: { score: 0.30 }, hints: [] }
+  - as: coder
+    recall: { query: "tests pass" }
+    expect: { answer_set: [{ status: proposed }], guidance: { code: unverified } }
+
+  # The job runner checks it later, as Ledger itself.
+  - advance: 2m
+  - run_jobs: {}
+    expect: { ran: 1 }
+  - as: coder
+    recall: { query: "tests pass" }
+    expect:
+      answer_set: [{ status: verified, trusted: true, trust: { score: 0.95 } }]
+      guidance: { code: reliable }
+  - as: coder
+    journal: { scope: "project:billing-api" }
+    expect:
+      - { kind: claim_written, actor: "agent:coder", content: { status: proposed } }
+      - kind: evidence_attached
+        actor: "system:ledger"
+        channel: internal
+        content: { evidence: [{ kind: verifier, verifier: test_run, outcome: pass, observed_at: "2026-11-01T09:02:00Z" }] }
+      - { kind: status_changed, actor: "system:ledger", content: { status: verified } }
+
+  # A job runs once: nothing is left to run.
+  - run_jobs: {}
+    expect: { ran: 0 }
+
+  # A refutation found in the background retracts the claim all the same.
+  - as: coder
+    remember: { subject: "repo:acme/payments", predicate: test_status, value: passing, text: "payments' tests pass" }
+    expect: { status: proposed, verification: pending }
+  - run_jobs: {}
+    expect: { ran: 1 }
+  - as: coder
+    recall: { query: "payments" }
+    expect: { answer_set: [] }
+
+  # Asking to verify now queues a slow check too, and attaches what the agent observed at once.
+  - as: coder
+    remember: { subject: "repo:acme/checkout", predicate: test_status, value: passing, text: "checkout's tests pass" }
+    label: checkout
+    expect: { verification: pending }
+  - run_jobs: {}
+    expect: { ran: 1 }
+  - script:
+      test_run:
+        "repo:acme/checkout": { outcome: pass, observed: passing, summary: "88 of 88 tests pass" }
+  - as: coder
+    attest:
+      claim: checkout
+      evidence: [{ tool: cargo.test, excerpt: "test result: ok. 88 passed" }]
+    expect:
+      outcome: pending
+      status: proposed
+      evidence: [{ kind: tool_result, tool: cargo.test }]
+      hints: []
+  - run_jobs: {}
+    expect: { ran: 1 }
+  - as: coder
+    recall: { query: "checkout" }
+    expect: { answer_set: [{ status: verified }] }
