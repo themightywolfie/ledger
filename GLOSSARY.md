@@ -60,7 +60,7 @@ A pointer to something observable that backs or refutes a claim (a tool result, 
 _Avoid_: proof, citation, reference
 
 **Channel**:
-The path a write arrived through: an agent, an integration acting for a framework, the visualizer, the command line, or a question put directly to the user. The channel and the actor's permissions fix a claim's source kind; what the claim says about itself never does.
+The path a write arrived through: an agent, an integration acting for a framework, the visualizer, the command line, a question put directly to the user, or Ledger itself re-verifying a claim. The channel and the actor's permissions fix a claim's source kind; what the claim says about itself never does.
 
 **User statement**:
 Evidence consisting of the user's own words, which counts only for predicates the user has authority over and only when it arrives through a user-stated channel. An agent's own words are never evidence for its own claim.

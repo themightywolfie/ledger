@@ -60,11 +60,11 @@ fn a_database_reopens_after_it_was_created() {
 async fn a_database_from_schema_version_1_is_brought_up_to_date_and_takes_a_policy() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ledgermem.db");
-    // Version 1 had every table this build creates except policies.
+    // Version 1 had every table this build creates except policies and jobs.
     drop(SqliteStore::open(&path).unwrap());
     rusqlite::Connection::open(&path)
         .unwrap()
-        .execute_batch("DROP TABLE policies; PRAGMA user_version = 1;")
+        .execute_batch("DROP TABLE policies; DROP TABLE jobs; PRAGMA user_version = 1;")
         .unwrap();
 
     let ledger = Ledger::new(

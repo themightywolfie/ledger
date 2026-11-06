@@ -2,25 +2,28 @@
 
 use std::sync::Arc;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 use time::{Duration, OffsetDateTime};
 
 use crate::caller::{Caller, Permission};
-use crate::claim::{Claim, ClaimId, Evidence, RetractionReason, Scope, ScopeLevel, Source, Status};
+use crate::claim::{
+    Claim, ClaimId, Evidence, EvidenceKind, RetractionReason, Scope, ScopeLevel, Source, Status,
+};
 use crate::clock::Clock;
 use crate::error::{Error, Result, internal};
 use crate::gate;
 use crate::journal::{self, EntryKind, JournalEntry, NewEntry, StoredEntry};
 use crate::ops::{
-    ApplyPolicy, Attest, AttestOutcome, BrokenLink, ChainReport, ClaimResult, Guidance,
-    GuidanceCode, JournalQuery, PolicyApplied, PolicyQuery, ReadIntent, ReadPack, Recall,
-    RecalledClaim, ReindexReport, Remember, RememberOutcome, ScopeVerification, Verification,
+    ApplyPolicy, Attest, AttestOutcome, AttestedOutcome, BrokenLink, ChainReport, ClaimResult,
+    Guidance, GuidanceCode, JobsRun, JournalQuery, PolicyApplied, PolicyQuery, ReadIntent,
+    ReadPack, Recall, RecalledClaim, ReindexReport, Remember, RememberOutcome, ScopeVerification,
+    Verification,
 };
-use crate::policy::{Policy, PolicyVersion, VerifierName, invalid_policy};
+use crate::policy::{FreshnessClass, Policy, PolicyVersion, VerifierName, invalid_policy};
 use crate::projector::{self, ClaimRetracted, Claims, EvidenceAttached, StatusChanged};
-use crate::store::{Commit, JournalHead, Store};
+use crate::store::{Commit, Job, JournalHead, NewJob, Store};
 use crate::trust;
-use crate::verifier::{Check, Outcome, Verifiers};
+use crate::verifier::{Check, Outcome, Verifier, Verifiers};
 
 /// The tenant a local install serves, created on first launch.
 pub const LOCAL_TENANT: &str = "local";
@@ -33,6 +36,12 @@ const REINDEX_ATTEMPTS: u32 = 3;
 /// How many times a write that depends on a claim's status reads the claim again after another
 /// write lands in its scope first.
 const WRITE_ATTEMPTS: u32 = 3;
+
+/// The most jobs one run of the job runner takes, so a long queue can't hold it for good.
+const JOBS_PER_RUN: u64 = 100;
+
+/// How long a runner holds a job before another may take it over. Longer than any check lasts.
+const JOB_LEASE: Duration = Duration::minutes(15);
 
 pub struct Ledger {
     store: Arc<dyn Store>,
@@ -76,7 +85,9 @@ impl Ledger {
     /// predicates' declared types. Each claim's source kind comes from the caller's channel and
     /// key, and the request can only lower it. If any claim fails a check, none is remembered.
     /// The verifier a claim's predicate declares then checks it inline: a pass verifies it, a
-    /// fail retracts it as refuted, and an inconclusive result changes nothing.
+    /// fail retracts it as refuted, and an inconclusive result changes nothing. A slow verifier
+    /// checks it in the background instead: the claim is written as it stands, with its check
+    /// queued in the same write, and its verification is pending until the job runner has run it.
     pub async fn remember(&self, caller: &Caller, req: Remember) -> Result<RememberOutcome> {
         caller.require(Permission::Propose)?;
         let now = self.clock.now();
@@ -136,6 +147,9 @@ impl Ledger {
             let verification = self
                 .verify_as_written(&mut claim, &policy, &mut hints)
                 .await;
+            if verification == Verification::Pending {
+                commit.queued.push(NewJob::check(claim.id.clone(), now));
+            }
             let standing = trust::standing(&claim, &policy, now);
             results.push(ClaimResult {
                 claim_id: claim.id.clone(),
@@ -165,8 +179,42 @@ impl Ledger {
         Ok(RememberOutcome { results })
     }
 
+    /// Runs now, rather than on the job runner's next turn, the checks a remember left pending,
+    /// and returns what the remember would have returned had they run inline. A check another
+    /// runner holds is left to it, and its claim stays pending, for the caller to ask again. For
+    /// a surface that can wait without holding up its client, such as an MCP task.
+    pub async fn finish_remember(
+        &self,
+        caller: &Caller,
+        mut outcome: RememberOutcome,
+    ) -> Result<RememberOutcome> {
+        let policy = self.policy_in(&caller.tenant, caller.bounds.project.as_deref())?;
+        for result in &mut outcome.results {
+            if result.verification != Verification::Pending {
+                continue;
+            }
+            let Some(claim) = self.finish_check(&caller.tenant, &result.claim_id).await? else {
+                continue;
+            };
+            result.verification = match last_check(&claim) {
+                Some((check, _)) => {
+                    result.hints.extend(check_hint(check));
+                    Verification::Done
+                }
+                None => Verification::Unchecked,
+            };
+            let standing = trust::standing(&claim, &policy, self.clock.now());
+            result.status = claim.status;
+            result.reason = claim.reason;
+            result.trusted = standing.trusted;
+            result.trust = standing.trust;
+        }
+        Ok(outcome)
+    }
+
     /// Checks a claim as it is written, unless the write gate quarantined it, and records what
-    /// the verifier found on the claim itself, so the entry that writes the claim fixes it.
+    /// the verifier found on the claim itself, so the entry that writes the claim fixes it. A
+    /// slow check is left pending.
     async fn verify_as_written(
         &self,
         claim: &mut Claim,
@@ -176,8 +224,8 @@ impl Ledger {
         if claim.status == Status::Quarantined {
             return Verification::Unchecked;
         }
-        let finding = match self.check(claim, policy, claim.recorded_at).await {
-            Ok(finding) => finding,
+        let declared = match self.declared_verifier(policy, claim) {
+            Ok(declared) => declared,
             Err(Unchecked::Undeclared) => return Verification::Unchecked,
             Err(unavailable) => {
                 hints.push(format!(
@@ -187,6 +235,10 @@ impl Ledger {
                 return Verification::Unchecked;
             }
         };
+        if declared.in_background() {
+            return Verification::Pending;
+        }
+        let finding = declared.check(claim, self.clock.as_ref()).await;
         hints.extend(finding.hint);
         if let Some(status) = status_after(claim.status, finding.outcome) {
             claim.status = status;
@@ -196,46 +248,28 @@ impl Ledger {
         Verification::Done
     }
 
-    /// Asks the verifier `claim`'s predicate declares what it finds now, recorded as evidence
-    /// observed at `at`, or says why nothing could.
-    async fn check(
-        &self,
-        claim: &Claim,
-        policy: &Policy,
-        at: OffsetDateTime,
-    ) -> Result<Finding, Unchecked> {
+    /// The verifier `claim`'s predicate declares, or why there is none to check it with.
+    fn declared_verifier(&self, policy: &Policy, claim: &Claim) -> Result<Declared<'_>, Unchecked> {
         let predicate = policy.predicate(&claim.predicate);
-        let declared = predicate.verifier.as_ref().ok_or(Unchecked::Undeclared)?;
-        let name = &declared.verifier;
+        let declared = predicate.verifier.clone().ok_or(Unchecked::Undeclared)?;
         let verifier = self
             .verifiers
-            .get(name)
-            .ok_or_else(|| Unchecked::Unavailable(name.clone()))?;
-        let check = Check {
-            claim,
-            params: &declared.params,
-        };
-        let observation = verifier.verify(check).await;
-        let hint = match observation.outcome {
-            Outcome::Pass => None,
-            Outcome::Fail => Some(format!("{name} refuted the claim: {}", observation.summary)),
-            Outcome::Inconclusive => Some(format!(
-                "{name} couldn't check the claim: {}",
-                observation.summary
-            )),
-        };
-        let system_of_record = predicate.system_of_record.as_ref() == Some(name);
-        Ok(Finding {
-            outcome: observation.outcome,
-            hint,
-            evidence: observation.into_evidence(name.clone(), system_of_record, at),
+            .get(&declared.verifier)
+            .ok_or_else(|| Unchecked::Unavailable(declared.verifier.clone()))?;
+        Ok(Declared {
+            system_of_record: predicate.system_of_record.as_ref() == Some(&declared.verifier),
+            name: declared.verifier,
+            params: declared.params,
+            verifier,
         })
     }
 
     /// Attaches a caller's evidence to a claim, and checks the claim against its predicate's
     /// verifier now unless asked not to. A pass verifies a proposed claim and renews a verified
     /// one's freshness, a fail retracts it as refuted, and an inconclusive result changes
-    /// nothing. The caller's own evidence is recorded, hashed, but attests nothing.
+    /// nothing. A slow verifier checks it in the background instead, queued in the same write,
+    /// and the outcome is pending. The caller's own evidence is recorded, hashed, but attests
+    /// nothing.
     pub async fn attest(&self, caller: &Caller, req: Attest) -> Result<AttestOutcome> {
         caller.require(Permission::Attest)?;
         let now = self.clock.now();
@@ -245,11 +279,19 @@ impl Ledger {
         let mut evidence = gate::attached_evidence(&req.evidence, now)
             .map_err(|wrong| Error::InvalidClaim(format!("{wrong}; nothing was attached")))?;
         let mut outcome = Outcome::Inconclusive;
+        let mut attested = AttestedOutcome::Inconclusive;
+        let mut queued = None;
         let mut hints = Vec::new();
         if req.verify_now {
-            match self.check(&claim, &policy, now).await {
-                Ok(finding) => {
+            match self.declared_verifier(&policy, &claim) {
+                Ok(declared) if declared.in_background() => {
+                    queued = Some(NewJob::check(claim.id.clone(), now));
+                    attested = AttestedOutcome::Pending;
+                }
+                Ok(declared) => {
+                    let finding = declared.check(&claim, self.clock.as_ref()).await;
                     outcome = finding.outcome;
+                    attested = finding.outcome.into();
                     hints.extend(finding.hint);
                     evidence.push(finding.evidence);
                 }
@@ -272,16 +314,107 @@ impl Ledger {
             ));
         }
 
-        // The outcome moves the claim on from the status it has when the attestation commits,
-        // so if another write lands in its scope first, read the claim again and decide again.
-        let mut read = Some((claim, head));
+        let attestation = Attestation {
+            by: caller.clone(),
+            evidence,
+            outcome,
+            queued,
+            finished: None,
+            at: self.clock.now(),
+        };
+        let reread = || self.attestable(caller, &req.claim_id).map(Some);
+        let claim = self
+            .record(&attestation, (claim, head), reread)?
+            .ok_or_else(|| internal(format!("{} vanished while it was attested", req.claim_id)))?;
+        let standing = trust::standing(&claim, &policy, attestation.at);
+        Ok(AttestOutcome {
+            claim_id: claim.id,
+            outcome: attested,
+            status: claim.status,
+            reason: claim.reason,
+            trusted: standing.trusted,
+            trust: standing.trust,
+            evidence: attestation.evidence,
+            hints,
+        })
+    }
+
+    /// Runs now, rather than on the job runner's next turn, the check an attest left pending, and
+    /// returns what the attest would have returned had it run inline: the outcome of the claim's
+    /// latest check. A check another runner holds is left to it, and the outcome stays pending,
+    /// for the caller to ask again. For a surface that can wait without holding up its client,
+    /// such as an MCP task.
+    pub async fn finish_attest(
+        &self,
+        caller: &Caller,
+        mut outcome: AttestOutcome,
+    ) -> Result<AttestOutcome> {
+        if outcome.outcome != AttestedOutcome::Pending {
+            return Ok(outcome);
+        }
+        let Some(claim) = self.finish_check(&caller.tenant, &outcome.claim_id).await? else {
+            return Ok(outcome);
+        };
+        match last_check(&claim) {
+            Some((check, found)) => {
+                outcome.outcome = found.into();
+                outcome.hints.extend(check_hint(check));
+                outcome.evidence.push(check.clone());
+            }
+            None => outcome.outcome = AttestedOutcome::Inconclusive,
+        }
+        let policy = self.policy_in(&caller.tenant, caller.bounds.project.as_deref())?;
+        let standing = trust::standing(&claim, &policy, self.clock.now());
+        outcome.status = claim.status;
+        outcome.reason = claim.reason;
+        outcome.trusted = standing.trusted;
+        outcome.trust = standing.trust;
+        Ok(outcome)
+    }
+
+    /// Runs the check queued for `claim_id` now, unless another runner holds it, and returns the
+    /// claim once no check is queued for it. None while another runner still holds its check.
+    async fn finish_check(&self, tenant: &str, claim_id: &ClaimId) -> Result<Option<Claim>> {
+        let now = self.clock.now();
+        match self
+            .store
+            .lease_job_for(tenant, claim_id, now, now + JOB_LEASE)?
+        {
+            Some(job) => self.run_job(job).await?,
+            None if self.store.job_waits(tenant, claim_id)? => return Ok(None),
+            None => {}
+        }
+        let (claim, _) = self
+            .store
+            .claim(tenant, claim_id)?
+            .ok_or_else(|| Error::NotFound(format!("there is no claim {claim_id}")))?;
+        Ok(Some(claim))
+    }
+
+    /// Records `attestation` against the claim `read` holds, as of where its scope's journal
+    /// ends. The outcome moves the claim on from the status it has when the attestation commits,
+    /// so if another write lands in the scope first, `reread` reads the claim again and the
+    /// outcome is decided again. Returns the claim as the attestation leaves it, or None if
+    /// `reread` finds nothing left to attest.
+    fn record(
+        &self,
+        attestation: &Attestation,
+        read: (Claim, JournalHead),
+        reread: impl Fn() -> Result<Option<(Claim, JournalHead)>>,
+    ) -> Result<Option<Claim>> {
+        let tenant = &attestation.by.tenant;
+        let mut read = Some(read);
         for _ in 0..WRITE_ATTEMPTS {
             let (claim, head) = match read.take() {
                 Some(read) => read,
-                None => self.attestable(caller, &req.claim_id)?,
+                None => match reread()? {
+                    Some(read) => read,
+                    None => return Ok(None),
+                },
             };
-            let entries = attestation_entries(caller, &claim, evidence.clone(), outcome, now)?;
-            let mut claims = Claims::from([(claim.id.clone(), claim)]);
+            let id = claim.id.clone();
+            let entries = attestation.entries(&claim)?;
+            let mut claims = Claims::from([(id.clone(), claim)]);
             let projections = entries
                 .iter()
                 .map(|entry| projector::project(entry.kind, &entry.content, &mut claims))
@@ -289,27 +422,16 @@ impl Ledger {
             let commit = Commit {
                 entries,
                 projections,
+                queued: attestation.queued.iter().cloned().collect(),
+                finished: attestation.finished.iter().cloned().collect(),
             };
-            if !self.store.commit_at(&caller.tenant, &[head], commit)? {
-                continue;
+            if self.store.commit_at(tenant, &[head], commit)? {
+                return Ok(claims.remove(&id));
             }
-            let claim = claims.remove(&req.claim_id).expect("the attested claim");
-            let standing = trust::standing(&claim, &policy, now);
-            return Ok(AttestOutcome {
-                claim_id: claim.id,
-                outcome,
-                status: claim.status,
-                reason: claim.reason,
-                trusted: standing.trusted,
-                trust: standing.trust,
-                evidence,
-                hints,
-            });
         }
         Err(Error::Busy(format!(
-            "other writes kept landing in {}'s scope while it was attested, {WRITE_ATTEMPTS} \
-             times; try again",
-            req.claim_id
+            "other writes kept landing in the claim's scope while it was attested, \
+             {WRITE_ATTEMPTS} times; try again"
         )))
     }
 
@@ -340,8 +462,76 @@ impl Ledger {
         }
     }
 
+    /// The job runner: runs the jobs that are due, in every tenant, and says how many ran. Each
+    /// re-verifies one claim against its verifier, and records what it found as Ledger's own, as
+    /// an attestation would. A job that fails stays leased, so it runs again once its lease runs
+    /// out, and the others still run. The process serving the ledger calls this from time to
+    /// time; nothing in the engine runs it otherwise.
+    pub async fn run_jobs(&self) -> Result<JobsRun> {
+        let mut run = JobsRun::default();
+        while run.ran + (run.failed.len() as u64) < JOBS_PER_RUN {
+            let now = self.clock.now();
+            let Some(job) = self.store.lease_job(now, now + JOB_LEASE)? else {
+                break;
+            };
+            match self.run_job(job).await {
+                Ok(()) => run.ran += 1,
+                Err(error) => run.failed.push(error.to_string()),
+            }
+        }
+        Ok(run)
+    }
+
+    /// Re-verifies a job's claim and records what the check found, finishing the job in the same
+    /// write. A claim no longer proposed, verified or contested, or that nothing can check any
+    /// more, just finishes the job. The claim is checked under the policy of its own scope.
+    async fn run_job(&self, job: Job) -> Result<()> {
+        let checkable = || -> Result<Option<(Claim, JournalHead)>> {
+            Ok(self
+                .store
+                .claim(&job.tenant, &job.claim_id)?
+                .filter(|(claim, _)| still_checked(claim.status)))
+        };
+        if let Some((claim, head)) = checkable()? {
+            let policy = self.policy_for(&job.tenant, &claim)?;
+            if let Ok(declared) = self.declared_verifier(&policy, &claim) {
+                let finding = declared.check(&claim, self.clock.as_ref()).await;
+                let attestation = Attestation {
+                    by: Caller::ledger_itself(&job.tenant),
+                    evidence: vec![finding.evidence],
+                    outcome: finding.outcome,
+                    queued: None,
+                    finished: Some(job.id.clone()),
+                    at: self.clock.now(),
+                };
+                if self
+                    .record(&attestation, (claim, head), checkable)?
+                    .is_some()
+                {
+                    return Ok(());
+                }
+            }
+        }
+        let finished = Commit {
+            finished: vec![job.id],
+            ..Commit::default()
+        };
+        Ok(self.store.commit(&job.tenant, finished)?)
+    }
+
+    /// The policy in effect in `claim`'s own scope: the tenant policy, with the claim's project
+    /// overlay when it lives in a project.
+    fn policy_for(&self, tenant: &str, claim: &Claim) -> Result<Policy> {
+        let project = match (&claim.scope.level, &claim.scope.id) {
+            (ScopeLevel::Project, Some(project)) => Some(project.as_str()),
+            _ => None,
+        };
+        self.policy_in(tenant, project)
+    }
+
     /// Recalls the claims that hold now and match the query, best match first, each scored at
-    /// the time of the read under the policy in effect for the caller.
+    /// the time of the read under the policy in effect for the caller. The stale volatile claims
+    /// it returns get their re-verification queued, and the read never waits for it.
     pub async fn recall(&self, caller: &Caller, req: Recall) -> Result<ReadPack> {
         caller.require(Permission::Read)?;
         let now = self.clock.now();
@@ -351,31 +541,51 @@ impl Ledger {
             self.store
                 .search(&caller.tenant, &caller.visible_scopes(), &req.query, limit)?;
 
-        let answer_set = claims
-            .into_iter()
-            .map(|claim| {
-                let standing = trust::standing(&claim, &policy, now);
-                RecalledClaim {
-                    trusted: standing.trusted,
-                    trust: standing.trust,
-                    age: format_age(now - claim.recorded_at),
-                    stale: standing.stale,
-                    injectable: standing.injectable,
-                    claim_id: claim.id,
-                    scope: claim.scope,
-                    subject: claim.subject,
-                    predicate: claim.predicate,
-                    value: claim.value,
-                    text: claim.text,
-                    status: claim.status,
-                    recorded_at: claim.recorded_at,
-                }
-            })
-            .collect::<Vec<_>>();
+        let mut reverify = Vec::new();
+        let mut answer_set = Vec::with_capacity(claims.len());
+        for claim in claims {
+            let standing = trust::standing(&claim, &policy, now);
+            let volatile = policy.predicate(&claim.predicate).freshness == FreshnessClass::Volatile;
+            // Queued only if the job runner, which checks the claim under the policy of its own
+            // scope, will find a verifier for it there.
+            if standing.stale
+                && volatile
+                && still_checked(claim.status)
+                && self
+                    .declared_verifier(&self.policy_for(&caller.tenant, &claim)?, &claim)
+                    .is_ok()
+            {
+                reverify.push(NewJob::check(claim.id.clone(), now));
+            }
+            answer_set.push(RecalledClaim {
+                trusted: standing.trusted,
+                trust: standing.trust,
+                age: format_age(now - claim.recorded_at),
+                stale: standing.stale,
+                injectable: standing.injectable,
+                claim_id: claim.id,
+                scope: claim.scope,
+                subject: claim.subject,
+                predicate: claim.predicate,
+                value: claim.value,
+                text: claim.text,
+                status: claim.status,
+                recorded_at: claim.recorded_at,
+            });
+        }
+        // Queueing is the read's only side effect, and the read still answers if it fails.
+        let ids = reverify.iter().map(|job| job.claim_id.clone()).collect();
+        let queue = Commit {
+            queued: reverify,
+            ..Commit::default()
+        };
+        let queued = queue.queued.is_empty() || self.store.commit(&caller.tenant, queue).is_ok();
+        let stale = if queued { ids } else { Vec::new() };
         Ok(ReadPack {
             intent: ReadIntent::Current,
             guidance: guidance(&answer_set, req.high_stakes),
             answer_set,
+            stale,
         })
     }
 
@@ -416,6 +626,7 @@ impl Ledger {
                 &mut Claims::new(),
             )?],
             entries: vec![entry],
+            ..Commit::default()
         };
         self.store.commit(&caller.tenant, commit)?;
         Ok(PolicyApplied {
@@ -572,49 +783,95 @@ impl Unchecked {
     }
 }
 
-/// The entries that record an attestation of `claim`: the evidence attached, then the status the
-/// outcome moves the claim on to, if any.
-fn attestation_entries(
-    caller: &Caller,
-    claim: &Claim,
-    evidence: Vec<Evidence>,
-    outcome: Outcome,
-    at: OffsetDateTime,
-) -> Result<Vec<NewEntry>> {
-    let entry = |kind, content: Result<Value, serde_json::Error>| -> Result<NewEntry> {
-        Ok(NewEntry {
-            id: NewEntry::generate_id(at),
-            scope: claim.scope.clone(),
-            kind,
-            actor: caller.actor.clone(),
-            channel: caller.channel,
-            recorded_at: at,
-            content: content.map_err(internal)?,
-        })
-    };
-    let claim_id = claim.id.clone();
-    let mut entries = vec![entry(
-        EntryKind::EvidenceAttached,
-        serde_json::to_value(EvidenceAttached {
-            claim_id: claim_id.clone(),
-            evidence,
-        }),
-    )?];
-    match status_after(claim.status, outcome) {
-        Some(Status::Retracted) => entries.push(entry(
-            EntryKind::ClaimRetracted,
-            serde_json::to_value(ClaimRetracted {
-                claim_id,
-                reason: RetractionReason::Refuted,
-            }),
-        )?),
-        Some(status) => entries.push(entry(
-            EntryKind::StatusChanged,
-            serde_json::to_value(StatusChanged { claim_id, status }),
-        )?),
-        None => {}
+/// The verifier a claim's predicate declares, as this ledger has it.
+struct Declared<'a> {
+    name: VerifierName,
+    params: Map<String, Value>,
+    /// Whether it is the predicate's system of record.
+    system_of_record: bool,
+    verifier: &'a dyn Verifier,
+}
+
+impl Declared<'_> {
+    /// Whether its check takes long enough that it runs in the background.
+    fn in_background(&self) -> bool {
+        self.verifier.runs_in_background(&self.params)
     }
-    Ok(entries)
+
+    /// What it finds about `claim` now, recorded as evidence observed when the check finished.
+    async fn check(&self, claim: &Claim, clock: &dyn Clock) -> Finding {
+        let check = Check {
+            claim,
+            params: &self.params,
+        };
+        let observation = self.verifier.verify(check).await;
+        let outcome = observation.outcome;
+        let evidence =
+            observation.into_evidence(self.name.clone(), self.system_of_record, clock.now());
+        Finding {
+            outcome,
+            hint: check_hint(&evidence),
+            evidence,
+        }
+    }
+}
+
+/// One attestation to record against a claim.
+struct Attestation {
+    /// Who made it: a caller, or Ledger itself.
+    by: Caller,
+    evidence: Vec<Evidence>,
+    /// What checking the claim found, which may move it on. Inconclusive when nothing checked it.
+    outcome: Outcome,
+    /// A slow check it leaves to the job runner.
+    queued: Option<NewJob>,
+    /// The job it finishes, when the job runner made it.
+    finished: Option<String>,
+    at: OffsetDateTime,
+}
+
+impl Attestation {
+    /// The entries that record it against `claim`: the evidence attached, if any, then the
+    /// status the outcome moves the claim on to, if any.
+    fn entries(&self, claim: &Claim) -> Result<Vec<NewEntry>> {
+        let entry = |kind, content: Result<Value, serde_json::Error>| -> Result<NewEntry> {
+            Ok(NewEntry {
+                id: NewEntry::generate_id(self.at),
+                scope: claim.scope.clone(),
+                kind,
+                actor: self.by.actor.clone(),
+                channel: self.by.channel,
+                recorded_at: self.at,
+                content: content.map_err(internal)?,
+            })
+        };
+        let claim_id = claim.id.clone();
+        let mut entries = Vec::new();
+        if !self.evidence.is_empty() {
+            entries.push(entry(
+                EntryKind::EvidenceAttached,
+                serde_json::to_value(EvidenceAttached {
+                    claim_id: claim_id.clone(),
+                    evidence: self.evidence.clone(),
+                }),
+            )?);
+        }
+        match status_after(claim.status, self.outcome) {
+            Some(Status::Retracted) => entries.push(entry(
+                EntryKind::ClaimRetracted,
+                serde_json::to_value(ClaimRetracted {
+                    claim_id,
+                    reason: RetractionReason::Refuted,
+                }),
+            )?),
+            Some(status) => entries.push(entry(
+                EntryKind::StatusChanged,
+                serde_json::to_value(StatusChanged { claim_id, status }),
+            )?),
+            None => {}
+        }
+        Ok(entries)
+    }
 }
 
 /// What a claim's verifier found.
@@ -624,6 +881,45 @@ struct Finding {
     evidence: Evidence,
     /// Why the claim didn't pass, for whoever wrote it.
     hint: Option<String>,
+}
+
+/// Why a verifier's evidence didn't pass the claim, for whoever wrote it.
+fn check_hint(evidence: &Evidence) -> Option<String> {
+    let EvidenceKind::Verifier {
+        verifier,
+        outcome,
+        summary,
+        ..
+    } = &evidence.kind
+    else {
+        return None;
+    };
+    match outcome {
+        Outcome::Pass => None,
+        Outcome::Fail => Some(format!("{verifier} refuted the claim: {summary}")),
+        Outcome::Inconclusive => Some(format!("{verifier} couldn't check the claim: {summary}")),
+    }
+}
+
+/// The latest check a verifier made of `claim`, and its outcome.
+fn last_check(claim: &Claim) -> Option<(&Evidence, Outcome)> {
+    claim
+        .evidence
+        .iter()
+        .rev()
+        .find_map(|evidence| match evidence.kind {
+            EvidenceKind::Verifier { outcome, .. } => Some((evidence, outcome)),
+            _ => None,
+        })
+}
+
+/// Whether a claim with `status` is still memory that re-verification can speak to. A check of a
+/// contested claim is recorded, though only a resolution moves it on.
+fn still_checked(status: Status) -> bool {
+    matches!(
+        status,
+        Status::Proposed | Status::Verified | Status::Contested
+    )
 }
 
 /// The status a verifier's outcome moves a claim with `status` on to, if any

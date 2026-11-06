@@ -385,3 +385,60 @@ async fn attest_records_what_the_agent_observed_hashed_and_timestamped() {
         })
     );
 }
+
+#[tokio::test]
+async fn the_servers_job_runner_re_verifies_the_stale_claims_a_read_queues() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("ledgermem.db");
+    apply_policy(
+        &db,
+        "version: 1
+predicates:
+  config_sha256:
+    freshness: volatile
+    reverify_after: 1s
+    system_of_record: file
+    verifier: { use: file, params: { check: sha256, path: '{subject_name}' } }
+",
+    );
+    let work = dir.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    std::fs::write(work.join("app.yaml"), CONFIG).unwrap();
+    let mut command = mcp_command(&db, &["--project", "billing-api"]);
+    command.current_dir(&work);
+    let client = connect_with(command).await;
+
+    let remembered = call(
+        &client,
+        "memory_remember",
+        json!({ "claims": [ {
+            "subject": "file:app.yaml",
+            "predicate": "config_sha256",
+            "value": format!("sha256:{CONFIG_SHA256}"),
+            "text": "app.yaml is the reviewed configuration"
+        } ] }),
+    )
+    .await;
+    assert_eq!(remembered["results"][0]["status"], "verified");
+    let claim_id = remembered["results"][0]["claim_id"].clone();
+
+    // The server runs on the real clock, so wait for the claim to go stale, for a read to queue
+    // its re-verification, and for the runner to find the file has changed.
+    std::fs::write(work.join("app.yaml"), "timeout: 5\n").unwrap();
+    let query = json!({ "query": "reviewed configuration" });
+    let mut named_as_queued = false;
+    let mut refuted = false;
+    for _ in 0..150 {
+        let recalled = call(&client, "memory_recall", query.clone()).await;
+        named_as_queued |= recalled["stale"] == json!([claim_id]);
+        if recalled["answer_set"] == json!([]) {
+            refuted = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    client.cancel().await.expect("close client");
+
+    assert!(named_as_queued, "a read names the claim as queued");
+    assert!(refuted, "the runner re-verifies the claim and refutes it");
+}

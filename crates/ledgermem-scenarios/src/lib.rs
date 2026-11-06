@@ -34,7 +34,18 @@
 //! ```
 //!
 //! Claim ids are generated, so a remember step can `label` the claim it writes, and an `attest`
-//! step can name it by that label as `claim`, in place of a `claim_id`.
+//! step can name it by that label as `claim`, in place of a `claim_id`. In an `expect`, the
+//! string `"$label"` stands for that claim's id.
+//!
+//! The scripted verifiers named under `slow` check claims in the background, and a `run_jobs`
+//! step runs the job runner once, as the process serving the ledger would:
+//!
+//! ```yaml
+//! slow: [test_run]
+//! steps:
+//!   - run_jobs: {}
+//!     expect: { ran: 1 }
+//! ```
 //!
 //! An `expect` is matched as a subset of the step's JSON outcome: objects need only the keys the
 //! scenario lists, arrays must have the same length, and numbers match within 1e-9.
@@ -64,6 +75,9 @@ struct Scenario {
     /// Scripted verifiers, and what each answers at first.
     #[serde(default)]
     verifiers: Script,
+    /// The scripted verifiers slow enough that their checks run in the background.
+    #[serde(default)]
+    slow: Vec<VerifierName>,
     steps: Vec<Step>,
 }
 
@@ -116,6 +130,8 @@ struct Step {
     advance: Option<String>,
     /// Changes what scripted verifiers answer from now on.
     script: Option<Script>,
+    /// Runs the job runner once: `run_jobs: {}`.
+    run_jobs: Option<Value>,
     remember: Option<ClaimInput>,
     /// A name for the claim a remember step writes, which later attest steps can use.
     label: Option<String>,
@@ -207,10 +223,26 @@ pub async fn run(yaml: &str) -> Result<(), String> {
         serde_yaml::from_str(yaml).map_err(|e| format!("unreadable scenario: {e}"))?;
     let clock = Arc::new(TestClock::new(scenario.clock));
     let store = SqliteStore::open_in_memory().map_err(|e| e.to_string())?;
+    if let Some(name) = scenario
+        .slow
+        .iter()
+        .find(|name| !scenario.verifiers.contains_key(*name))
+    {
+        return Err(format!(
+            "slow: {name} isn't a scripted verifier; declare it under `verifiers`"
+        ));
+    }
     let scripted: Scripted = scenario
         .verifiers
         .keys()
-        .map(|name| (name.clone(), Arc::default()))
+        .map(|name| {
+            let verifier = if scenario.slow.contains(name) {
+                ScriptedVerifier::in_background()
+            } else {
+                ScriptedVerifier::default()
+            };
+            (name.clone(), Arc::new(verifier))
+        })
         .collect();
     let verifiers = scripted
         .iter()
@@ -347,11 +379,15 @@ async fn run_step(world: &World, labels: &mut Labels, mut step: Step) -> Result<
     if let Some(script) = step.script.take() {
         return apply_script(scripted, script);
     }
+    if step.run_jobs.take().is_some() {
+        let ran = to_json(ledger.run_jobs().await);
+        return expected_outcome(ran, step.expect);
+    }
 
     let name = step
         .caller
         .as_deref()
-        .ok_or("a step needs `as`, `advance` or `script`")?;
+        .ok_or("a step needs `as`, `advance`, `script` or `run_jobs`")?;
     let caller = callers
         .get(name)
         .ok_or_else(|| format!("unknown caller {name:?}"))?;
@@ -384,7 +420,42 @@ async fn run_step(world: &World, labels: &mut Labels, mut step: Step) -> Result<
         Action::ShowPolicy(query) => to_json(ledger.policy(caller, query).await),
     };
 
-    let expected = step.expect.unwrap_or(Value::Null);
+    let expect = step
+        .expect
+        .map(|expected| with_labels(expected, labels))
+        .transpose()?;
+    expected_outcome(outcome, expect)
+}
+
+/// `expected`, with each `"$label"` replaced by the id of the claim a remember step labelled.
+fn with_labels(expected: Value, labels: &Labels) -> Result<Value, String> {
+    Ok(match expected {
+        Value::String(text) => match text.strip_prefix('$') {
+            Some(label) => labels
+                .get(label)
+                .cloned()
+                .ok_or_else(|| format!("expect: no remember step is labelled {label}"))?,
+            None => Value::String(text),
+        },
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(|item| with_labels(item, labels))
+                .collect::<Result<_, _>>()?,
+        ),
+        Value::Object(fields) => Value::Object(
+            fields
+                .into_iter()
+                .map(|(key, value)| Ok((key, with_labels(value, labels)?)))
+                .collect::<Result<_, String>>()?,
+        ),
+        other => other,
+    })
+}
+
+/// Matches a step's outcome, or its error, against what the step expects.
+fn expected_outcome(outcome: Result<Value, Value>, expect: Option<Value>) -> Result<(), String> {
+    let expected = expect.unwrap_or(Value::Null);
     let expects_error = expected.get("error").is_some();
     match outcome {
         Ok(outcome) if expects_error => Err(format!("expected an error, got {outcome}")),

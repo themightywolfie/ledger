@@ -220,6 +220,7 @@ fn late_claim() -> Commit {
             recorded_at: datetime!(2026-10-26 09:00 UTC),
             content,
         }],
+        ..Commit::default()
     }
 }
 

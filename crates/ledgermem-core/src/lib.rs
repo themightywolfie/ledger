@@ -27,17 +27,17 @@ pub use error::{Error, Result};
 pub use journal::{EntryKind, JournalEntry, NewEntry, StoredEntry, genesis_hash};
 pub use ledger::{LOCAL_TENANT, Ledger};
 pub use ops::{
-    ApplyPolicy, Attest, AttestOutcome, BrokenLink, ChainProblem, ChainReport, ClaimInput,
-    ClaimResult, EvidenceInput, EvidenceInputKind, Guidance, GuidanceCode, JournalQuery,
-    PolicyApplied, PolicyQuery, ReadIntent, ReadPack, Recall, RecalledClaim, ReindexReport,
-    RelayedUserStatement, Remember, RememberOutcome, ReportedSource, ScopeVerification,
-    Verification,
+    ApplyPolicy, Attest, AttestOutcome, AttestedOutcome, BrokenLink, ChainProblem, ChainReport,
+    ClaimInput, ClaimResult, EvidenceInput, EvidenceInputKind, Guidance, GuidanceCode, JobsRun,
+    JournalQuery, PolicyApplied, PolicyQuery, ReadIntent, ReadPack, Recall, RecalledClaim,
+    ReindexReport, RelayedUserStatement, Remember, RememberOutcome, ReportedSource,
+    ScopeVerification, Verification,
 };
 pub use policy::{
     AgentClaims, AppliedVersion, Authority, Cardinality, FreshnessClass, FreshnessIntervals,
     Interval, OnUnresolved, Policy, PolicyDocument, PolicyVersion, Predicate, PredicatePack,
     ResolutionPolicy, Subjects, TrustPolicy, ValueType, VerifierName, VerifierRef,
 };
-pub use store::{Commit, JournalHead, Projection, Store, StoreError, StoredJournal};
+pub use store::{Commit, Job, JournalHead, NewJob, Projection, Store, StoreError, StoredJournal};
 pub use trust::{Trust, TrustComponents};
 pub use verifier::{Check, Observation, Outcome, ScriptedVerifier, Verifier, Verifiers, Verifying};

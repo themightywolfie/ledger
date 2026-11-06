@@ -4,6 +4,7 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
 use ledgermem_core::{
@@ -19,6 +20,9 @@ type BoxError = Box<dyn Error + Send + Sync>;
 
 /// How `verify` exits when a journal doesn't verify. Errors exit 1 and usage errors exit 2.
 const EXIT_CHAIN_BROKEN: u8 = 3;
+
+/// How often a server's job runner looks for due jobs.
+const JOB_RUNNER_PERIOD: Duration = Duration::from_secs(1);
 
 #[derive(Parser)]
 #[command(
@@ -142,7 +146,29 @@ async fn mcp(args: McpArgs) -> Result<(), BoxError> {
         agent: args.agent,
         relay_user: !args.no_relay_user,
     };
-    serve_stdio(ledger, launch.caller()).await
+    let runner = tokio::spawn(run_jobs(ledger.clone()));
+    let served = serve_stdio(ledger, launch.caller()).await;
+    runner.abort();
+    served
+}
+
+/// The job runner: runs the ledger's due jobs, such as slow checks and re-verification of stale
+/// claims, for as long as the server runs. Several servers sharing a database each run one, and
+/// the queue's leases keep them from running a job twice. Stdout carries the protocol, so
+/// problems go to stderr.
+async fn run_jobs(ledger: Arc<Ledger>) {
+    let mut ticks = tokio::time::interval(JOB_RUNNER_PERIOD);
+    loop {
+        ticks.tick().await;
+        match ledger.run_jobs().await {
+            Ok(run) => {
+                for failure in run.failed {
+                    eprintln!("ledgermem: a job failed, and will run again: {failure}");
+                }
+            }
+            Err(error) => eprintln!("ledgermem: the job runner couldn't lease a job: {error}"),
+        }
+    }
 }
 
 async fn verify(args: OperatorArgs) -> Result<ExitCode, BoxError> {

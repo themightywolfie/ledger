@@ -23,6 +23,12 @@ pub trait Verifier: Send + Sync {
     /// What the system says about the claim `check` names. Anything that keeps the verifier from
     /// looking, a timeout included, is an inconclusive observation rather than an error.
     fn verify<'a>(&'a self, check: Check<'a>) -> Verifying<'a>;
+
+    /// Whether a check with `params` takes long enough that no write may wait on it, such as
+    /// re-running a test suite. Such a check runs in the background. Most checks don't.
+    fn runs_in_background(&self, _params: &Map<String, Value>) -> bool {
+        false
+    }
 }
 
 /// What a verifier returns: the observation, once it has looked.
@@ -67,6 +73,7 @@ pub struct Verifiers(BTreeMap<VerifierName, Arc<dyn Verifier>>);
 #[derive(Debug, Default)]
 pub struct ScriptedVerifier {
     script: Mutex<BTreeMap<String, Observation>>,
+    in_background: bool,
 }
 
 impl Check<'_> {
@@ -170,6 +177,14 @@ impl Verifiers {
 }
 
 impl ScriptedVerifier {
+    /// A scripted verifier slow enough that its checks run in the background.
+    pub fn in_background() -> Self {
+        ScriptedVerifier {
+            in_background: true,
+            ..Self::default()
+        }
+    }
+
     /// Answers `observation` about claims on `subject`, written as Ledger keeps it, from now on.
     pub fn script(&self, subject: &str, observation: Observation) {
         self.script
@@ -192,6 +207,10 @@ impl Verifier for ScriptedVerifier {
                 Observation::inconclusive(format!("nothing is scripted for {subject}"))
             });
         Box::pin(std::future::ready(observation))
+    }
+
+    fn runs_in_background(&self, _params: &Map<String, Value>) -> bool {
+        self.in_background
     }
 }
 

@@ -1,4 +1,7 @@
 //! The store port, in the engine's terms. No SQL appears above it (ADR-0001).
+//!
+//! Besides journals and their projections, a store keeps the job queue: operational state, not
+//! memory, so it is never journaled and a reindex leaves it alone.
 
 use time::OffsetDateTime;
 
@@ -30,6 +33,30 @@ pub trait Store: Send + Sync {
     /// snapshot. None when the tenant has no such claim.
     fn claim(&self, tenant: &str, id: &ClaimId)
     -> Result<Option<(Claim, JournalHead)>, StoreError>;
+
+    /// Leases the queued job that has waited longest, in any tenant, among those no runner holds:
+    /// never leased, or with a lease that ran out by `now`. The lease lasts until `until`, so a
+    /// runner that stops before it finishes the job leaves it for another. None when no job is
+    /// waiting.
+    fn lease_job(
+        &self,
+        now: OffsetDateTime,
+        until: OffsetDateTime,
+    ) -> Result<Option<Job>, StoreError>;
+
+    /// Leases the job queued for `claim_id`, as [`Store::lease_job`] would, so whoever is waiting
+    /// on that claim's check can run it now. None when no job is queued for it, or a runner holds
+    /// the one that is.
+    fn lease_job_for(
+        &self,
+        tenant: &str,
+        claim_id: &ClaimId,
+        now: OffsetDateTime,
+        until: OffsetDateTime,
+    ) -> Result<Option<Job>, StoreError>;
+
+    /// Whether a job is still queued for `claim_id`, whether or not a runner holds it.
+    fn job_waits(&self, tenant: &str, claim_id: &ClaimId) -> Result<bool, StoreError>;
 
     /// Full-text search over claim text and subject within the given scopes, best match first.
     /// Equally good matches come in claim id order, so results don't depend on storage order.
@@ -83,11 +110,44 @@ pub struct JournalHead {
     pub seq: u64,
 }
 
-/// One write: the journal entries and the projection updates built from them.
+/// One write: the journal entries, the projection updates built from them, and the jobs it
+/// queues or finishes.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Commit {
     pub entries: Vec<NewEntry>,
     pub projections: Vec<Projection>,
+    /// Jobs the write calls for. A claim already waiting on a job isn't queued again.
+    pub queued: Vec<NewJob>,
+    /// The ids of the jobs the write finishes, which leave the queue.
+    pub finished: Vec<String>,
+}
+
+/// A job to queue: checking one claim again against its predicate's verifier, in the background.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewJob {
+    /// `job_` followed by a ULID.
+    pub id: String,
+    pub claim_id: ClaimId,
+    pub queued_at: OffsetDateTime,
+}
+
+/// A queued job, as a runner leases it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Job {
+    pub id: String,
+    pub tenant: String,
+    pub claim_id: ClaimId,
+}
+
+impl NewJob {
+    /// A job to check `claim_id` again, queued at `at`.
+    pub(crate) fn check(claim_id: ClaimId, at: OffsetDateTime) -> Self {
+        NewJob {
+            id: format!("job_{}", ulid::Ulid::from_datetime(at.into())),
+            claim_id,
+            queued_at: at,
+        }
+    }
 }
 
 /// A change to the tables reads are served from.

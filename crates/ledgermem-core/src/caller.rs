@@ -31,6 +31,8 @@ pub enum Channel {
     Visualizer,
     Cli,
     Elicitation,
+    /// Ledger itself, re-verifying claims in the background.
+    Internal,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -105,6 +107,18 @@ impl Caller {
             tenant: tenant.to_owned(),
             actor: format!("operator:{operator}"),
             channel,
+            permissions: BTreeSet::new(),
+            bounds: ScopeBounds::default(),
+        }
+    }
+
+    /// Ledger itself, acting in `tenant` on the internal channel: the job runner re-verifying a
+    /// claim. It holds no permissions, because nothing outside the engine ever acts as it.
+    pub(crate) fn ledger_itself(tenant: &str) -> Self {
+        Caller {
+            tenant: tenant.to_owned(),
+            actor: "system:ledger".to_owned(),
+            channel: Channel::Internal,
             permissions: BTreeSet::new(),
             bounds: ScopeBounds::default(),
         }

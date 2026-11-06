@@ -13,3 +13,9 @@ rmcp = { workspace = true, features = ["server", "macros", "transport-io"] }
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tokio = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+ledgermem-sqlite.workspace = true
+rmcp = { workspace = true, features = ["client"] }
+tokio = { workspace = true, features = ["io-util"] }
